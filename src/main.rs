@@ -4,18 +4,15 @@ use std::time::Duration;
 
 use alligator::{Bridge, MockBridge, Source, UnifiedTimeline};
 use crossterm::event::{self, Event, KeyCode};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    enable_raw_mode()?;
     let mut terminal = ratatui::init();
 
     let run_result = run_app(&mut terminal);
 
     ratatui::restore();
-    disable_raw_mode()?;
 
     run_result
 }

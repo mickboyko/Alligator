@@ -9,6 +9,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 const SPLASH_DURATION: Duration = Duration::from_secs(3);
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SPLASH_ART: &[&str] = &[
     "                          ..........                                                                ",
     "                     ...:.          ::...                                                           ",
@@ -153,12 +154,19 @@ fn draw_splash(frame: &mut Frame) {
     let theme = Style::default().fg(Color::LightGreen);
     let accent = Style::default().fg(Color::Magenta);
 
-    frame.render_widget(Block::default().style(Style::default().bg(Color::Black)), area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Black)),
+        area,
+    );
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
-        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     let header = Layout::default()
@@ -167,7 +175,9 @@ fn draw_splash(frame: &mut Frame) {
         .split(layout[0]);
 
     frame.render_widget(
-        Paragraph::new("v0.1.0").style(theme).alignment(Alignment::Left),
+        Paragraph::new(format!("v{APP_VERSION}"))
+            .style(theme)
+            .alignment(Alignment::Left),
         header[0],
     );
     frame.render_widget(
@@ -186,10 +196,7 @@ fn draw_splash(frame: &mut Frame) {
             .map(|line| Line::styled(*line, theme.add_modifier(Modifier::BOLD))),
     );
     lines.push(Line::styled("", theme));
-    lines.push(Line::styled(
-        "Corporate Communications Aggregator",
-        theme,
-    ));
+    lines.push(Line::styled("Corporate Communications Aggregator", theme));
 
     frame.render_widget(
         Paragraph::new(Text::from(lines)).alignment(Alignment::Center),

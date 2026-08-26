@@ -5,6 +5,7 @@ Rust TUI application that aggregates messages from multiple bridge sources into 
 
 ## Current behavior
 
+- Startup splash screen with custom ASCII alligator art and title treatment
 - Simulated bridge sources for Slack, Teams, and Google Chat
 - Left sidebar showing:
   - source indicator
@@ -20,3 +21,4 @@ cargo run
 ```
 
 Use `↑` / `↓` to change selected room and `q` to quit.
+Press any key to dismiss the splash screen immediately, or wait for it to continue automatically.

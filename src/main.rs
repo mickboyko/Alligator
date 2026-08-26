@@ -1,11 +1,49 @@
 use std::error::Error;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alligator::{Bridge, MockBridge, Source, UnifiedTimeline};
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::prelude::*;
+use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+
+const SPLASH_DURATION: Duration = Duration::from_secs(3);
+const SPLASH_ART: &[&str] = &[
+    "                          ..........                                                                ",
+    "                     ...:.          ::...                                                           ",
+    "                    ..     ...:.::....  ..:.....;.:..                                               ",
+    "                ....     .....      .....   ..:.    .:                                              ",
+    "            . :.       ....  .........  ...    .;.    ;.                                            ",
+    "          .::.        ...  ..:++++.+++.:. .:.   ..:;. ..;                                           ",
+    "        ;;..    ........ ...;+x+++ +++++.:...::.    ..;:..;;..                                      ",
+    "     ...      ... ...     ....++x+.+x++.. .. .....      ........:.                     .. ..        ",
+    "   ...       ..         .    ..;;;:;;;...                   ..   ......;....        ............    ",
+    " ...                            ..... .                                  .::.........   .       ..  ",
+    ".             ....:;;;::....                                                           :;:..     .. ",
+    "      .    ..; .. :. ..... .:.                                                         .....      :.",
+    "    .    ..   .             .....                                                                  ;",
+    "  ...    ..                    ......           ...                                               .:",
+    "   ..     ..           ......   .;. .....:+::::.....;....;::;.     ...+..       .       .       .:.",
+    "      .     ...             ...  .  ::.   :..;.     .:...:. ..........  ..:::;;...+..::...;;:++::.",
+    "       ..     .......        ..... ...    .+;.       :;:;.    ::.;.       ::;.   .;.;.      :::    ",
+    "        .        ..  .           ......... ..       .:;.      :+:.        ;;:     +;.       ;;..   ",
+];
+const SPLASH_TITLE: &[&str] = &[
+    "          :::     :::        :::        ::::::::::: ::::::::      ::: ::::::::::: ::::::::  ::::::::: ",
+    "       :+: :+:   :+:        :+:            :+:    :+:    :+:   :+: :+:   :+:    :+:    :+: :+:    :+:",
+    "     +:+   +:+  +:+        +:+            +:+    +:+         +:+   +:+  +:+    +:+    +:+ +:+    +:+ ",
+    "   +#++:++#++: +#+        +#+            +#+    :#:        +#++:++#++: +#+    +#+    +:+ +#++:++#:  ",
+    "  +#+     +#+ +#+        +#+            +#+    +#+   +#+# +#+     +#+ +#+    +#+    +#+ +#+    +#+  ",
+    "#+#     #+# #+#        #+#            #+#    #+#    #+# #+#     #+# #+#    #+#    #+# #+#    #+#   ",
+    "###     ### ########## ########## ########### ########  ###     ### ###     ########  ###    ###    ",
+];
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Screen {
+    Splash,
+    Timeline,
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = ratatui::init();
@@ -61,6 +99,8 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
 
     let mut timeline = UnifiedTimeline::new();
     let mut selected = 0usize;
+    let splash_started = Instant::now();
+    let mut screen = Screen::Splash;
 
     loop {
         while let Ok(message) = rx.try_recv() {
@@ -72,26 +112,98 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
             selected = rooms.len() - 1;
         }
 
-        terminal.draw(|frame| draw(frame, &rooms, selected))?;
+        if screen == Screen::Splash && splash_started.elapsed() >= SPLASH_DURATION {
+            screen = Screen::Timeline;
+        }
+
+        terminal.draw(|frame| draw(frame, &rooms, selected, screen))?;
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Up => selected = selected.saturating_sub(1),
-                    KeyCode::Down => {
-                        if selected + 1 < rooms.len() {
-                            selected += 1;
+                match screen {
+                    Screen::Splash => match key.code {
+                        KeyCode::Char('q') => return Ok(()),
+                        _ => screen = Screen::Timeline,
+                    },
+                    Screen::Timeline => match key.code {
+                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Up => selected = selected.saturating_sub(1),
+                        KeyCode::Down => {
+                            if selected + 1 < rooms.len() {
+                                selected += 1;
+                            }
                         }
-                    }
-                    _ => {}
+                        _ => {}
+                    },
                 }
             }
         }
     }
 }
 
-fn draw(frame: &mut Frame, rooms: &[&alligator::Room], selected: usize) {
+fn draw(frame: &mut Frame, rooms: &[&alligator::Room], selected: usize, screen: Screen) {
+    match screen {
+        Screen::Splash => draw_splash(frame),
+        Screen::Timeline => draw_timeline(frame, rooms, selected),
+    }
+}
+
+fn draw_splash(frame: &mut Frame) {
+    let area = frame.area();
+    let theme = Style::default().fg(Color::LightGreen);
+    let accent = Style::default().fg(Color::Magenta);
+
+    frame.render_widget(Block::default().style(Style::default().bg(Color::Black)), area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(2)])
+        .split(area);
+
+    let header = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[0]);
+
+    frame.render_widget(
+        Paragraph::new("v0.1.0").style(theme).alignment(Alignment::Left),
+        header[0],
+    );
+    frame.render_widget(
+        Paragraph::new("[ secure. unified. real-time ]")
+            .style(theme)
+            .alignment(Alignment::Right),
+        header[1],
+    );
+
+    let mut lines = vec![Line::styled("", theme)];
+    lines.extend(SPLASH_ART.iter().map(|line| Line::styled(*line, theme)));
+    lines.push(Line::styled("", theme));
+    lines.extend(
+        SPLASH_TITLE
+            .iter()
+            .map(|line| Line::styled(*line, theme.add_modifier(Modifier::BOLD))),
+    );
+    lines.push(Line::styled("", theme));
+    lines.push(Line::styled(
+        "Corporate Communications Aggregator",
+        theme,
+    ));
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).alignment(Alignment::Center),
+        layout[1],
+    );
+    frame.render_widget(
+        Paragraph::new("[ press any key to continue | q quits ]")
+            .style(accent)
+            .alignment(Alignment::Center),
+        layout[2],
+    );
+}
+
+fn draw_timeline(frame: &mut Frame, rooms: &[&alligator::Room], selected: usize) {
     let layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])

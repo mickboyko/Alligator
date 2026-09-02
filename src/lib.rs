@@ -31,7 +31,7 @@ pub struct Message {
 
 impl Message {
     pub fn room_key(&self) -> String {
-        format!("{}:{}", self.source.as_str(), self.room_id)
+        self.room_id.to_string()
     }
 }
 
@@ -69,6 +69,8 @@ impl UnifiedTimeline {
         let key = message.room_key();
 
         if let Some(room) = self.rooms.get_mut(&key) {
+            room.source = message.source;
+            room.title = message.room_title.to_string();
             room.preview = message.body.clone();
             room.messages.push(message);
         } else {
@@ -180,5 +182,17 @@ mod tests {
         let ordered = timeline.ordered_rooms();
         assert_eq!(ordered[0].source, Source::Slack);
         assert_eq!(ordered[1].source, Source::Teams);
+    }
+
+    #[test]
+    fn keeps_shared_room_ungrouped_across_sources() {
+        let mut timeline = UnifiedTimeline::new();
+        timeline.ingest(sample_message(Source::Slack, "eng", "slack msg"));
+        timeline.ingest(sample_message(Source::Teams, "eng", "teams msg"));
+
+        let rooms = timeline.ordered_rooms();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].preview, "teams msg");
+        assert_eq!(rooms[0].messages.len(), 2);
     }
 }

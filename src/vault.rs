@@ -153,6 +153,7 @@ impl Vault {
         let payload = encrypt_payload(&empty_payload, &master_key)?;
         let disk = VaultDisk {
             version: VAULT_VERSION,
+            owner_user: Some(Self::current_os_user()),
             password_envelope,
             passkey_envelopes,
             token_metadata: Vec::new(),
@@ -169,10 +170,21 @@ impl Vault {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, VaultError> {
         let contents = fs::read_to_string(path.as_ref())?;
-        let disk: VaultDisk = serde_json::from_str(&contents)?;
+        let mut disk: VaultDisk = serde_json::from_str(&contents)?;
         if disk.version != VAULT_VERSION {
             return Err(VaultError::InvalidData("unsupported vault version"));
         }
+        let current_user = Self::current_os_user();
+        let owner_user = disk
+            .owner_user
+            .clone()
+            .unwrap_or_else(|| current_user.clone());
+        if owner_user != current_user {
+            return Err(VaultError::InvalidInput(
+                "vault belongs to a different OS user".to_string(),
+            ));
+        }
+        disk.owner_user = Some(owner_user);
         validate_recovery_policy(
             disk.password_envelope.is_some(),
             disk.passkey_envelopes.len(),
@@ -182,6 +194,14 @@ impl Vault {
             path: path.as_ref().to_path_buf(),
             disk,
         })
+    }
+
+    pub fn current_os_user() -> String {
+        std::env::var("USER")
+            .ok()
+            .or_else(|| std::env::var("USERNAME").ok())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "unknown-user".to_string())
     }
 
     pub fn path(&self) -> &Path {
@@ -378,6 +398,8 @@ struct VaultPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VaultDisk {
     version: u32,
+    #[serde(default)]
+    owner_user: Option<String>,
     password_envelope: Option<WrappedKey>,
     passkey_envelopes: Vec<PasskeyEnvelope>,
     token_metadata: Vec<TokenMetadata>,

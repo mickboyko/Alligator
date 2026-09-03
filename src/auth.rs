@@ -144,14 +144,7 @@ impl AuthManager {
 
     pub fn unlocked_mut(&mut self) -> Option<&mut UnlockedVault> {
         match &mut self.state {
-            LockState::Unlocked {
-                unlocked,
-                last_activity,
-                ..
-            } => {
-                *last_activity = Instant::now();
-                Some(unlocked)
-            }
+            LockState::Unlocked { unlocked, .. } => Some(unlocked),
             LockState::Locked { .. } => None,
         }
     }

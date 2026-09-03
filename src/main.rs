@@ -8,13 +8,13 @@ use alligator::auth::AuthManager;
 use alligator::providers::{
     OAuthRefresher, OAuthSessionManager, RefreshResult, SessionCredentialProvider,
 };
-use alligator::vault::Vault;
+use alligator::vault::{UnlockedVault, Vault};
 use alligator::{Bridge, MockBridge, Source, UnifiedTimeline};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::prelude::*;
+use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
-const SPLASH_DURATION: Duration = Duration::from_secs(3);
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(90);
 const LOCK_COOLDOWN: Duration = Duration::from_secs(10);
@@ -52,9 +52,11 @@ const SPLASH_TITLE: &[&str] = &[
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Screen {
+    SetupProfile,
     Splash,
     Unlock,
     Timeline,
+    Settings,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -96,29 +98,35 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>> {
-    let mut vault = load_or_initialize_vault()?;
+    let profile_path = profile_vault_path();
+    let mut vault = if profile_path.exists() {
+        Some(Vault::open(&profile_path)?)
+    } else {
+        None
+    };
+
     let refresh_manager = OAuthSessionManager::new(DemoRefresher);
     let mut auth = AuthManager::new(MAX_FAILED_ATTEMPTS, LOCK_COOLDOWN, INACTIVITY_TIMEOUT);
+    let mut screen = if vault.is_some() {
+        Screen::Splash
+    } else {
+        Screen::SetupProfile
+    };
 
-    let splash_started = Instant::now();
-    let mut screen = Screen::Splash;
     let mut selected = 0usize;
     let mut runtime: Option<BridgeRuntime> = None;
     let mut input_mode: Option<InputMode> = None;
     let mut input_buffer = String::new();
     let mut status_message = String::new();
+    let mut splash_entered_at = Instant::now();
 
     loop {
-        if screen == Screen::Splash && splash_started.elapsed() >= SPLASH_DURATION {
-            screen = Screen::Unlock;
-        }
-
         if auth.is_unlocked() {
             let now = current_epoch_secs();
-            if let Some(unlocked) = auth.unlocked_mut() {
+            if let (Some(vault_ref), Some(unlocked)) = (vault.as_mut(), auth.unlocked_mut()) {
                 let refreshed = refresh_manager.refresh_expiring_tokens(unlocked, now)?;
                 if refreshed > 0 {
-                    vault.commit(unlocked)?;
+                    vault_ref.commit(unlocked)?;
                     status_message = format!("Refreshed {refreshed} OAuth token(s)");
                 }
             }
@@ -126,7 +134,8 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
             if auth.should_auto_lock() {
                 auth.lock("inactivity_timeout");
                 runtime = None;
-                screen = Screen::Unlock;
+                screen = Screen::Splash;
+                splash_entered_at = Instant::now();
                 input_mode = None;
                 input_buffer.clear();
                 status_message = "Auto-locked due to inactivity".to_string();
@@ -156,7 +165,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                 input_mode,
                 &input_buffer,
                 &status_message,
-                &vault,
+                vault.as_ref(),
             )
         })?;
 
@@ -173,39 +182,87 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
             auth.mark_activity();
 
             match screen {
-                Screen::Splash => screen = Screen::Unlock,
+                Screen::SetupProfile => match edit_input(&mut input_buffer, key) {
+                    EditAction::Submit => {
+                        if input_buffer.trim().is_empty() {
+                            status_message = "Password cannot be empty".to_string();
+                            continue;
+                        }
+
+                        let mut created =
+                            Vault::create(&profile_path, Some(input_buffer.as_str()), &[])?;
+                        let mut unlocked = created.unlock_with_password(input_buffer.as_str())?;
+                        seed_demo_tokens(&mut unlocked);
+                        created.commit(&unlocked)?;
+                        vault = Some(created);
+                        input_buffer.clear();
+                        status_message = "Profile created. Continue to splash/login.".to_string();
+                        screen = Screen::Splash;
+                        splash_entered_at = Instant::now();
+                    }
+                    EditAction::Cancel => {
+                        input_buffer.clear();
+                    }
+                    EditAction::Continue => {}
+                },
+                Screen::Splash => {
+                    if splash_entered_at.elapsed() >= Duration::from_millis(100) {
+                        screen = Screen::Unlock;
+                        input_mode = None;
+                        input_buffer.clear();
+                        status_message = "Choose unlock method".to_string();
+                    }
+                }
                 Screen::Unlock => {
                     if let Some(mode) = input_mode {
-                        if handle_text_edit(&mut input_buffer, key) {
-                            let result = match mode {
-                                InputMode::UnlockPassword => {
-                                    auth.unlock_with_password(&vault, input_buffer.as_str())
-                                }
-                                InputMode::UnlockPasskey => {
-                                    let (credential_id, passkey_secret) =
-                                        parse_passkey_input(input_buffer.as_str());
-                                    auth.unlock_with_passkey(&vault, credential_id, passkey_secret)
-                                }
-                                _ => Ok(()),
-                            };
+                        match edit_input(&mut input_buffer, key) {
+                            EditAction::Submit => {
+                                let result = if let Some(vault_ref) = vault.as_ref() {
+                                    match mode {
+                                        InputMode::UnlockPassword => auth
+                                            .unlock_with_password(vault_ref, input_buffer.as_str()),
+                                        InputMode::UnlockPasskey => {
+                                            let (credential_id, passkey_secret) =
+                                                parse_passkey_input(input_buffer.as_str());
+                                            auth.unlock_with_passkey(
+                                                vault_ref,
+                                                credential_id,
+                                                passkey_secret,
+                                            )
+                                        }
+                                        _ => Ok(()),
+                                    }
+                                } else {
+                                    Err(alligator::auth::AuthError::Vault(
+                                        alligator::vault::VaultError::InvalidInput(
+                                            "missing vault".to_string(),
+                                        ),
+                                    ))
+                                };
 
-                            match result {
-                                Ok(()) => {
-                                    runtime = auth
-                                        .unlocked()
-                                        .map(start_bridges)
-                                        .transpose()
-                                        .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
-                                    screen = Screen::Timeline;
-                                    status_message = "Unlocked".to_string();
+                                match result {
+                                    Ok(()) => {
+                                        runtime = auth
+                                            .unlocked()
+                                            .map(start_bridges)
+                                            .transpose()
+                                            .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+                                        screen = Screen::Timeline;
+                                        status_message = "Unlocked".to_string();
+                                    }
+                                    Err(err) => {
+                                        status_message = format!("Unlock failed: {err}");
+                                    }
                                 }
-                                Err(err) => {
-                                    status_message = format!("Unlock failed: {err}");
-                                }
+
+                                input_mode = None;
+                                input_buffer.clear();
                             }
-
-                            input_mode = None;
-                            input_buffer.clear();
+                            EditAction::Cancel => {
+                                input_mode = None;
+                                input_buffer.clear();
+                            }
+                            EditAction::Continue => {}
                         }
                     } else {
                         match key.code {
@@ -224,75 +281,101 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                         }
                     }
                 }
-                Screen::Timeline => {
+                Screen::Timeline => match key.code {
+                    KeyCode::Up => selected = selected.saturating_sub(1),
+                    KeyCode::Down => {
+                        if selected + 1 < rooms.len() {
+                            selected += 1;
+                        }
+                    }
+                    KeyCode::Char('l') => {
+                        auth.lock("manual_lock");
+                        runtime = None;
+                        screen = Screen::Splash;
+                        splash_entered_at = Instant::now();
+                        status_message = "Locked".to_string();
+                    }
+                    KeyCode::Char('s') => {
+                        screen = Screen::Settings;
+                        input_mode = None;
+                        input_buffer.clear();
+                        status_message = "Settings opened".to_string();
+                    }
+                    _ => {}
+                },
+                Screen::Settings => {
                     if let Some(mode) = input_mode {
-                        if handle_text_edit(&mut input_buffer, key) {
-                            if let Some(unlocked) = auth.unlocked_mut() {
-                                let op = match mode {
-                                    InputMode::EnrollPasskey => {
-                                        let (credential_id, passkey_secret) =
-                                            parse_passkey_input(input_buffer.as_str());
-                                        vault.enroll_passkey(
-                                            unlocked,
-                                            credential_id,
-                                            passkey_secret,
-                                        )
-                                    }
-                                    InputMode::RotatePassword => {
-                                        vault.rotate_password(unlocked, input_buffer.as_str())
-                                    }
-                                    InputMode::RevokePasskey => {
-                                        vault.revoke_passkey(input_buffer.as_str())
-                                    }
-                                    _ => Ok(()),
-                                };
+                        match edit_input(&mut input_buffer, key) {
+                            EditAction::Submit => {
+                                if let (Some(vault_ref), Some(unlocked)) =
+                                    (vault.as_mut(), auth.unlocked_mut())
+                                {
+                                    let op = match mode {
+                                        InputMode::EnrollPasskey => {
+                                            let (credential_id, passkey_secret) =
+                                                parse_passkey_input(input_buffer.as_str());
+                                            vault_ref.enroll_passkey(
+                                                unlocked,
+                                                credential_id,
+                                                passkey_secret,
+                                            )
+                                        }
+                                        InputMode::RotatePassword => vault_ref
+                                            .rotate_password(unlocked, input_buffer.as_str()),
+                                        InputMode::RevokePasskey => {
+                                            vault_ref.revoke_passkey(input_buffer.as_str())
+                                        }
+                                        _ => Ok(()),
+                                    };
 
-                                match op {
-                                    Ok(()) => {
-                                        status_message = "Security settings updated".to_string()
-                                    }
-                                    Err(err) => {
-                                        status_message = format!("Security update failed: {err}")
+                                    match op {
+                                        Ok(()) => {
+                                            status_message = "Security settings updated".to_string()
+                                        }
+                                        Err(err) => {
+                                            status_message =
+                                                format!("Security update failed: {err}")
+                                        }
                                     }
                                 }
+                                input_mode = None;
+                                input_buffer.clear();
                             }
-
-                            input_mode = None;
-                            input_buffer.clear();
-                        }
-                        continue;
-                    }
-
-                    match key.code {
-                        KeyCode::Up => selected = selected.saturating_sub(1),
-                        KeyCode::Down => {
-                            if selected + 1 < rooms.len() {
-                                selected += 1;
+                            EditAction::Cancel => {
+                                input_mode = None;
+                                input_buffer.clear();
                             }
+                            EditAction::Continue => {}
                         }
-                        KeyCode::Char('l') => {
-                            auth.lock("manual_lock");
-                            runtime = None;
-                            screen = Screen::Unlock;
-                            status_message = "Locked".to_string();
+                    } else {
+                        match key.code {
+                            KeyCode::Char('b') => screen = Screen::Timeline,
+                            KeyCode::Char('l') => {
+                                auth.lock("manual_lock");
+                                runtime = None;
+                                screen = Screen::Splash;
+                                splash_entered_at = Instant::now();
+                                status_message = "Locked".to_string();
+                            }
+                            KeyCode::Char('e') => {
+                                input_mode = Some(InputMode::EnrollPasskey);
+                                input_buffer.clear();
+                                status_message =
+                                    "Enroll passkey as credential_id:secret then Enter".to_string();
+                            }
+                            KeyCode::Char('r') => {
+                                input_mode = Some(InputMode::RotatePassword);
+                                input_buffer.clear();
+                                status_message = "Enter new password then Enter".to_string();
+                            }
+                            KeyCode::Char('x') => {
+                                input_mode = Some(InputMode::RevokePasskey);
+                                input_buffer.clear();
+                                status_message =
+                                    "Enter passkey credential_id to revoke".to_string();
+                            }
+                            _ => {}
                         }
-                        KeyCode::Char('e') => {
-                            input_mode = Some(InputMode::EnrollPasskey);
-                            input_buffer.clear();
-                            status_message =
-                                "Enroll passkey as credential_id:secret then Enter".to_string();
-                        }
-                        KeyCode::Char('r') => {
-                            input_mode = Some(InputMode::RotatePassword);
-                            input_buffer.clear();
-                            status_message = "Enter new password then Enter".to_string();
-                        }
-                        KeyCode::Char('x') => {
-                            input_mode = Some(InputMode::RevokePasskey);
-                            input_buffer.clear();
-                            status_message = "Enter passkey credential_id to revoke".to_string();
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -300,43 +383,35 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
     }
 }
 
-fn load_or_initialize_vault() -> Result<Vault, Box<dyn Error>> {
-    let path = PathBuf::from(".alligator-vault.json");
-    if path.exists() {
-        return Ok(Vault::open(&path)?);
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum EditAction {
+    Continue,
+    Submit,
+    Cancel,
+}
+
+fn edit_input(buffer: &mut String, key: KeyEvent) -> EditAction {
+    match key.code {
+        KeyCode::Char(c) => buffer.push(c),
+        KeyCode::Backspace => {
+            buffer.pop();
+        }
+        KeyCode::Enter => return EditAction::Submit,
+        KeyCode::Esc => return EditAction::Cancel,
+        _ => {}
     }
+    EditAction::Continue
+}
 
-    let bootstrap_password = std::env::var("ALLIGATOR_BOOTSTRAP_PASSWORD").map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Set ALLIGATOR_BOOTSTRAP_PASSWORD before first run",
-        )
-    })?;
+fn profile_vault_path() -> PathBuf {
+    let user = Vault::current_os_user().replace(
+        |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
+        "_",
+    );
+    PathBuf::from(format!(".alligator-vault-{user}.json"))
+}
 
-    let bootstrap_passkey_1 = std::env::var("ALLIGATOR_BOOTSTRAP_PASSKEY_1").map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Set ALLIGATOR_BOOTSTRAP_PASSKEY_1 before first run",
-        )
-    })?;
-
-    let bootstrap_passkey_2 = std::env::var("ALLIGATOR_BOOTSTRAP_PASSKEY_2").map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Set ALLIGATOR_BOOTSTRAP_PASSKEY_2 before first run",
-        )
-    })?;
-
-    let mut vault = Vault::create(
-        &path,
-        Some(bootstrap_password.as_str()),
-        &[
-            ("device-key-1".to_string(), bootstrap_passkey_1),
-            ("device-key-2".to_string(), bootstrap_passkey_2),
-        ],
-    )?;
-
-    let mut unlocked = vault.unlock_with_password(bootstrap_password.as_str())?;
+fn seed_demo_tokens(unlocked: &mut UnlockedVault) {
     unlocked.upsert_token(
         "slack",
         vec!["chat:read".to_string()],
@@ -358,14 +433,9 @@ fn load_or_initialize_vault() -> Result<Vault, Box<dyn Error>> {
         "gchat-demo-access",
         "gchat-demo-refresh",
     );
-    vault.commit(&unlocked)?;
-
-    Ok(vault)
 }
 
-fn start_bridges(
-    unlocked: &alligator::vault::UnlockedVault,
-) -> Result<BridgeRuntime, std::io::Error> {
+fn start_bridges(unlocked: &UnlockedVault) -> Result<BridgeRuntime, std::io::Error> {
     let credentials = Arc::new(SessionCredentialProvider::from_unlocked(unlocked));
     let (tx, rx) = mpsc::channel();
 
@@ -438,22 +508,6 @@ fn parse_passkey_input(input: &str) -> (&str, &str) {
     (credential_id, secret)
 }
 
-fn handle_text_edit(buffer: &mut String, key: KeyEvent) -> bool {
-    match key.code {
-        KeyCode::Char(c) => buffer.push(c),
-        KeyCode::Backspace => {
-            buffer.pop();
-        }
-        KeyCode::Enter => return true,
-        KeyCode::Esc => {
-            buffer.clear();
-            return true;
-        }
-        _ => {}
-    }
-    false
-}
-
 fn draw(
     frame: &mut Frame,
     screen: Screen,
@@ -462,13 +516,53 @@ fn draw(
     input_mode: Option<InputMode>,
     input_buffer: &str,
     status_message: &str,
-    vault: &Vault,
+    vault: Option<&Vault>,
 ) {
     match screen {
+        Screen::SetupProfile => draw_setup_profile(frame, input_buffer, status_message),
         Screen::Splash => draw_splash(frame),
         Screen::Unlock => draw_unlock(frame, input_mode, input_buffer, status_message, vault),
-        Screen::Timeline => draw_timeline(frame, rooms, selected, input_mode, status_message),
+        Screen::Timeline => draw_timeline(frame, rooms, selected, status_message),
+        Screen::Settings => draw_settings(frame, input_mode, input_buffer, status_message, vault),
     }
+}
+
+fn draw_setup_profile(frame: &mut Frame, input_buffer: &str, status_message: &str) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Length(4),
+            Constraint::Min(1),
+        ])
+        .split(frame.area());
+
+    frame.render_widget(
+        Paragraph::new(
+            "No local profile found for this OS user.\nCreate a password profile to initialize encrypted auth vault.",
+        )
+        .block(Block::default().borders(Borders::ALL).title("Profile setup"))
+        .wrap(Wrap { trim: true }),
+        layout[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(format!("Password: {input_buffer}")).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("New password (Enter to create)"),
+        ),
+        layout[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new(status_message)
+            .block(Block::default().borders(Borders::ALL).title("Status"))
+            .wrap(Wrap { trim: true }),
+        layout[2],
+    );
 }
 
 fn draw_splash(frame: &mut Frame) {
@@ -537,7 +631,7 @@ fn draw_unlock(
     input_mode: Option<InputMode>,
     input_buffer: &str,
     status_message: &str,
-    vault: &Vault,
+    vault: Option<&Vault>,
 ) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -550,14 +644,21 @@ fn draw_unlock(
         ])
         .split(frame.area());
 
-    let passkeys = vault.passkey_ids().collect::<Vec<_>>().join(", ");
+    let passkeys = vault
+        .map(|vault| vault.passkey_ids().collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
     let help = format!(
-        "App is locked.\n[p] Unlock with password\n[k] Unlock with passkey (credential_id:secret)\nAvailable passkey IDs: {passkeys}"
+        "Authenticate to unlock local encrypted profile.\n[p] Password\n[k] Physical key / Windows Hello (credential_id:secret)\nConfigured passkeys: {}",
+        if passkeys.is_empty() {
+            "none"
+        } else {
+            passkeys.as_str()
+        }
     );
 
     frame.render_widget(
         Paragraph::new(help)
-            .block(Block::default().borders(Borders::ALL).title("Unlock"))
+            .block(Block::default().borders(Borders::ALL).title("Login"))
             .wrap(Wrap { trim: true }),
         layout[0],
     );
@@ -586,7 +687,6 @@ fn draw_timeline(
     frame: &mut Frame,
     rooms: &[&alligator::Room],
     selected: usize,
-    input_mode: Option<InputMode>,
     status_message: &str,
 ) {
     let columns = Layout::default()
@@ -610,7 +710,7 @@ fn draw_timeline(
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Rooms (q quit | l lock | e enroll key | r rotate pw | x revoke key)"),
+                .title("Rooms (q quit | l lock | s settings)"),
         )
         .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .highlight_symbol(">> ");
@@ -623,11 +723,7 @@ fn draw_timeline(
 
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(4),
-            Constraint::Length(4),
-        ])
+        .constraints([Constraint::Min(1), Constraint::Length(4)])
         .split(columns[1]);
 
     let timeline_text = rooms
@@ -650,29 +746,69 @@ fn draw_timeline(
         right[0],
     );
 
-    let input_prompt = match input_mode {
+    frame.render_widget(
+        Paragraph::new(status_message)
+            .block(Block::default().borders(Borders::ALL).title("Status"))
+            .wrap(Wrap { trim: true }),
+        right[1],
+    );
+}
+
+fn draw_settings(
+    frame: &mut Frame,
+    input_mode: Option<InputMode>,
+    input_buffer: &str,
+    status_message: &str,
+    vault: Option<&Vault>,
+) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Length(3),
+            Constraint::Length(4),
+            Constraint::Min(1),
+        ])
+        .split(frame.area());
+
+    let passkeys = vault
+        .map(|vault| vault.passkey_ids().collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
+    let text = format!(
+        "Authentication settings\n[e] Enroll physical key / Windows Hello credential\n[r] Rotate password\n[x] Revoke passkey\n[l] Lock now\n[b] Back to timeline\nPasskeys: {}",
+        if passkeys.is_empty() {
+            "none"
+        } else {
+            passkeys.as_str()
+        }
+    );
+
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(Block::default().borders(Borders::ALL).title("Settings"))
+            .wrap(Wrap { trim: true }),
+        layout[0],
+    );
+
+    let prompt = match input_mode {
         Some(InputMode::EnrollPasskey) => "Enroll passkey as credential_id:secret",
-        Some(InputMode::RotatePassword) => "Enter new password",
-        Some(InputMode::RevokePasskey) => "Enter credential_id to revoke",
+        Some(InputMode::RotatePassword) => "New password",
+        Some(InputMode::RevokePasskey) => "Passkey credential_id to revoke",
         _ => "",
     };
 
     frame.render_widget(
-        Paragraph::new(input_prompt)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Security Input"),
-            )
-            .wrap(Wrap { trim: true }),
-        right[1],
+        Paragraph::new(format!("{prompt}: {input_buffer}"))
+            .block(Block::default().borders(Borders::ALL).title("Input")),
+        layout[1],
     );
 
     frame.render_widget(
         Paragraph::new(status_message)
             .block(Block::default().borders(Borders::ALL).title("Status"))
             .wrap(Wrap { trim: true }),
-        right[2],
+        layout[2],
     );
 }
 

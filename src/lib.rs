@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use providers::CredentialProvider;
 
@@ -116,7 +116,8 @@ pub struct MockBridge {
     room_title: &'static str,
     author: &'static str,
     messages: Vec<&'static str>,
-    interval: Duration,
+    min_interval: Duration,
+    max_interval: Duration,
 }
 
 impl MockBridge {
@@ -127,7 +128,8 @@ impl MockBridge {
         room_title: &'static str,
         author: &'static str,
         messages: Vec<&'static str>,
-        interval: Duration,
+        min_interval: Duration,
+        max_interval: Duration,
     ) -> Self {
         Self {
             source,
@@ -136,7 +138,8 @@ impl MockBridge {
             room_title,
             author,
             messages,
-            interval,
+            min_interval,
+            max_interval,
         }
     }
 }
@@ -164,7 +167,18 @@ impl Bridge for MockBridge {
                     {
                         return;
                     }
-                    thread::sleep(self.interval);
+                    let sleep_duration = if self.max_interval > self.min_interval {
+                        let jitter_window_ms =
+                            (self.max_interval - self.min_interval).as_millis() as u64;
+                        let jitter_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|duration| duration.as_nanos() as u64 % (jitter_window_ms + 1))
+                            .unwrap_or(0);
+                        self.min_interval + Duration::from_millis(jitter_ms)
+                    } else {
+                        self.min_interval
+                    };
+                    thread::sleep(sleep_duration);
                 }
             }
         });

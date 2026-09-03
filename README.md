@@ -12,7 +12,7 @@ Rust TUI application that aggregates messages from multiple bridge sources into 
   - OAuth token secrets are encrypted on disk
   - Non-secret token metadata (provider/scopes/expiry) is stored separately
   - Vault file is bound to the current OS user identity
-  - Vault unlock supports password or passkey-style credential IDs + secrets
+  - Vault unlock supports password or enrolled YubiKey credentials
 - Simulated bridge sources for Slack, Teams, and Google Chat (only active when unlocked)
 - Left sidebar showing:
   - source indicator
@@ -35,14 +35,20 @@ After setup, use any key on splash to open login.
 
 - Unlock methods:
   - `p` → password unlock
-  - `k` → passkey unlock with `credential_id:secret`
+  - `k` → security-key unlock via **YubiKey PIV PIN** (for enrolled key)
 - Timeline actions:
   - `↑` / `↓` → move selected room
   - `l` → lock immediately (returns to splash)
   - `s` → open authentication settings
 - Authentication settings actions:
   - `l` → lock immediately
-  - `e` → enroll passkey (`credential_id:secret`)
+  - `e` → enroll connected YubiKey (prompts for YubiKey PIN and stores key serial credential)
   - `r` → rotate password
-  - `x` → revoke passkey
+  - `x` → revoke key credential by ID (for example `yubikey:12345678`)
   - `b` → back to timeline
+
+## YubiKey integration notes
+
+- Uses the `yubikey` crate (PIV/PCSC path).
+- Enrollment verifies PIN on the connected key and stores a credential ID tied to that key serial.
+- Key login checks for an enrolled key serial and verifies PIN before unlocking.

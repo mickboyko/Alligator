@@ -8,7 +8,7 @@ use alligator::auth::AuthManager;
 use alligator::providers::{
     OAuthRefresher, OAuthSessionManager, RefreshResult, SessionCredentialProvider,
 };
-use alligator::vault::{UnlockedVault, Vault};
+use alligator::vault::{UnlockedVault, Vault, VaultError};
 use alligator::{Bridge, MockBridge, Source, UnifiedTimeline};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::prelude::*;
@@ -273,10 +273,10 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                 status_message = "Enter password and press Enter".to_string();
                             }
                             KeyCode::Char('k') => {
-                                input_mode = Some(InputMode::UnlockSecurityKeyTap);
+                                input_mode = None;
                                 input_buffer.clear();
-                                status_message =
-                                    "Tap your hardware key, then press Enter".to_string();
+                                status_message = "Hardware-key unlock is temporarily disabled for security. Use password unlock."
+                                    .to_string();
                             }
                             _ => {}
                         }
@@ -372,10 +372,10 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                 status_message = "Locked".to_string();
                             }
                             KeyCode::Char('e') => {
-                                input_mode = Some(InputMode::EnrollSecurityKeyTap);
+                                input_mode = None;
                                 input_buffer.clear();
-                                status_message =
-                                    "Tap your hardware key, then press Enter to enroll".to_string();
+                                status_message = "Hardware-key enrollment is temporarily disabled for security."
+                                    .to_string();
                             }
                             KeyCode::Char('r') => {
                                 input_mode = Some(InputMode::RotatePassword);
@@ -399,57 +399,19 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
 }
 
 fn enroll_security_key(vault: &mut Vault, unlocked: &UnlockedVault) -> Result<String, String> {
-    let credential_id = generate_security_key_credential_id();
-    let passkey_secret = credential_id.clone();
-    vault
-        .enroll_passkey(unlocked, credential_id.as_str(), passkey_secret.as_str())
-        .map_err(|err| err.to_string())?;
-
-    Ok(credential_id)
+    let _ = (vault, unlocked);
+    Err("hardware-key enrollment is disabled until secure device-backed verification is implemented".to_string())
 }
 
 fn unlock_with_security_key_tap(
     auth: &mut AuthManager,
     vault: &Vault,
 ) -> Result<(), alligator::auth::AuthError> {
-    let enrolled = vault
-        .passkey_ids()
-        .filter(|credential_id| credential_id.starts_with("fido2:"))
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-
-    if enrolled.is_empty() {
-        return Err(alligator::auth::AuthError::Vault(
-            alligator::vault::VaultError::InvalidInput(
-                "no enrolled security-key credentials".to_string(),
-            ),
-        ));
-    }
-
-    for credential_id in &enrolled {
-        let passkey_secret = credential_id.as_str();
-        match vault.unlock_with_passkey(credential_id.as_str(), passkey_secret) {
-            Ok(_) => {
-                return auth.unlock_with_passkey(vault, credential_id.as_str(), passkey_secret);
-            }
-            Err(_) => continue,
-        }
-    }
-
-    if let Some(first_credential) = enrolled.first() {
-        let secret = first_credential.as_str();
-        return auth.unlock_with_passkey(vault, first_credential.as_str(), secret);
-    }
-
-    Err(alligator::auth::AuthError::Vault(
-        alligator::vault::VaultError::InvalidInput("security-key login failed".to_string()),
-    ))
-}
-
-fn generate_security_key_credential_id() -> String {
-    let value = rand::random::<u64>();
-    let encoded = format!("{value:016x}");
-    format!("fido2:local:{}-{}", &encoded[..8], &encoded[8..])
+    let _ = (auth, vault);
+    Err(alligator::auth::AuthError::Vault(VaultError::InvalidInput(
+        "hardware-key unlock is disabled until secure device-backed verification is implemented"
+            .to_string(),
+    )))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -718,7 +680,7 @@ fn draw_unlock(
         })
         .unwrap_or_default();
     let help = format!(
-        "Authenticate to unlock local encrypted profile.\n[p] Password\n[k] Physical security key (tap key and press Enter)\nConfigured security keys: {credential_count}",
+        "Authenticate to unlock local encrypted profile.\n[p] Password\n[k] Physical security key (currently disabled)\nConfigured security keys: {credential_count}",
     );
 
     frame.render_widget(
@@ -851,7 +813,7 @@ fn draw_settings(
         })
         .unwrap_or_default();
     let text = format!(
-        "Authentication settings\n[e] Enroll physical security key (tap key + Enter)\n[r] Rotate password\n[x] Revoke credential\n[l] Lock now\n[b] Back to timeline\nConfigured security keys: {credential_count}",
+        "Authentication settings\n[e] Enroll physical security key (currently disabled)\n[r] Rotate password\n[x] Revoke credential\n[l] Lock now\n[b] Back to timeline\nConfigured security keys: {credential_count}",
     );
 
     frame.render_widget(
@@ -903,4 +865,34 @@ fn current_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(label: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "alligator-main-{label}-{}.json",
+            rand::random::<u64>()
+        ));
+        path
+    }
+
+    #[test]
+    fn security_key_unlock_is_disabled() {
+        let password = format!("pw-{}", rand::random::<u64>());
+        let path = temp_path("security-key-disabled");
+        let vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
+        let mut auth = AuthManager::new(3, Duration::from_secs(1), Duration::from_secs(60));
+
+        let err = unlock_with_security_key_tap(&mut auth, &vault)
+            .expect_err("security-key unlock should be disabled");
+        assert!(
+            err.to_string().contains("disabled"),
+            "unexpected error: {err}"
+        );
+        assert!(!auth.is_unlocked());
+    }
 }

@@ -12,7 +12,7 @@ Rust TUI application that aggregates messages from multiple bridge sources into 
   - OAuth token secrets are encrypted on disk
   - Non-secret token metadata (provider/scopes/expiry) is stored separately
   - Vault file is bound to the current OS user identity
-  - Vault unlock supports password or enrolled generic security-key credentials
+  - Vault unlock currently supports password
 - Simulated bridge sources for Slack, Teams, and Google Chat (only active when unlocked)
 - Left sidebar showing:
   - source indicator
@@ -35,21 +35,19 @@ After setup, use any key on splash to open login.
 
 - Unlock methods:
   - `p` → password unlock
-  - `k` → security-key unlock (tap key, then press Enter)
+  - `k` → reserved; hardware-key unlock is currently disabled
 - Timeline actions:
   - `↑` / `↓` → move selected room
   - `l` → lock immediately (returns to splash)
   - `s` → open authentication settings
 - Authentication settings actions:
   - `l` → lock immediately
-  - `e` → enroll security key (tap key, then press Enter)
+  - `e` → reserved; hardware-key enrollment is currently disabled
   - `r` → rotate password
   - `x` → revoke key credential by ID (for example `fido2:local:12ab34cd-56ef7890`)
   - `b` → back to timeline
 
 ## Generic security-key notes
 
-- Uses a vendor-neutral local FIDO2-style credential flow for physical keys.
-- Enrollment stores a generated `fido2:` credential bound to your local profile.
-- Login with `k` attempts authentication against enrolled `fido2:` credentials after tap confirmation.
-- During tap-only enroll/login prompts, typed characters are ignored; press `Enter` to confirm the tap action.
+- Hardware-key flows are intentionally disabled until a secure device-backed challenge/verification path is implemented.
+- This avoids insecure tap-only simulation behavior that could permit Enter-only unlock.

@@ -23,6 +23,7 @@ impl Source {
 #[derive(Debug, Clone)]
 pub struct Message {
     pub source: Source,
+    pub stream_id: &'static str,
     pub room_id: &'static str,
     pub room_title: &'static str,
     pub author: &'static str,
@@ -69,6 +70,8 @@ impl UnifiedTimeline {
         let key = message.room_key();
 
         if let Some(room) = self.rooms.get_mut(&key) {
+            room.source = message.source;
+            room.title = message.room_title.to_string();
             room.preview = message.body.clone();
             room.messages.push(message);
         } else {
@@ -93,6 +96,7 @@ pub trait Bridge: Send + 'static {
 
 pub struct MockBridge {
     source: Source,
+    stream_id: &'static str,
     room_id: &'static str,
     room_title: &'static str,
     author: &'static str,
@@ -103,6 +107,7 @@ pub struct MockBridge {
 impl MockBridge {
     pub fn new(
         source: Source,
+        stream_id: &'static str,
         room_id: &'static str,
         room_title: &'static str,
         author: &'static str,
@@ -111,6 +116,7 @@ impl MockBridge {
     ) -> Self {
         Self {
             source,
+            stream_id,
             room_id,
             room_title,
             author,
@@ -128,6 +134,7 @@ impl Bridge for MockBridge {
                     if sender
                         .send(Message {
                             source: self.source,
+                            stream_id: self.stream_id,
                             room_id: self.room_id,
                             room_title: self.room_title,
                             author: self.author,
@@ -148,9 +155,15 @@ impl Bridge for MockBridge {
 mod tests {
     use super::*;
 
-    fn sample_message(source: Source, room_id: &'static str, body: &str) -> Message {
+    fn sample_message(
+        source: Source,
+        stream_id: &'static str,
+        room_id: &'static str,
+        body: &str,
+    ) -> Message {
         Message {
             source,
+            stream_id,
             room_id,
             room_title: "Engineering",
             author: "bot",
@@ -161,8 +174,8 @@ mod tests {
     #[test]
     fn keeps_latest_preview_for_room() {
         let mut timeline = UnifiedTimeline::new();
-        timeline.ingest(sample_message(Source::Slack, "eng", "first"));
-        timeline.ingest(sample_message(Source::Slack, "eng", "second"));
+        timeline.ingest(sample_message(Source::Slack, "stream-a", "eng", "first"));
+        timeline.ingest(sample_message(Source::Slack, "stream-a", "eng", "second"));
 
         let rooms = timeline.ordered_rooms();
         assert_eq!(rooms.len(), 1);
@@ -173,12 +186,41 @@ mod tests {
     #[test]
     fn moves_recent_room_to_front() {
         let mut timeline = UnifiedTimeline::new();
-        timeline.ingest(sample_message(Source::Slack, "eng", "slack"));
-        timeline.ingest(sample_message(Source::Teams, "sales", "teams"));
-        timeline.ingest(sample_message(Source::Slack, "eng", "slack again"));
+        timeline.ingest(sample_message(Source::Slack, "stream-a", "eng", "slack"));
+        timeline.ingest(sample_message(Source::Teams, "stream-b", "sales", "teams"));
+        timeline.ingest(sample_message(
+            Source::Slack,
+            "stream-a",
+            "eng",
+            "slack again",
+        ));
 
         let ordered = timeline.ordered_rooms();
         assert_eq!(ordered[0].source, Source::Slack);
         assert_eq!(ordered[1].source, Source::Teams);
+    }
+
+    #[test]
+    fn keeps_single_room_entry_across_streams() {
+        let mut timeline = UnifiedTimeline::new();
+        timeline.ingest(sample_message(Source::Teams, "account-a", "ops", "from account a"));
+        timeline.ingest(sample_message(Source::Teams, "account-b", "ops", "from account b"));
+
+        let rooms = timeline.ordered_rooms();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].preview, "from account b");
+        assert_eq!(rooms[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn keeps_sources_separate_for_same_room_id() {
+        let mut timeline = UnifiedTimeline::new();
+        timeline.ingest(sample_message(Source::Slack, "stream-a", "eng", "slack msg"));
+        timeline.ingest(sample_message(Source::Teams, "stream-b", "eng", "teams msg"));
+
+        let rooms = timeline.ordered_rooms();
+        assert_eq!(rooms.len(), 2);
+        assert_eq!(rooms[0].source, Source::Teams);
+        assert_eq!(rooms[1].source, Source::Slack);
     }
 }

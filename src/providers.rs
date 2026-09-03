@@ -148,14 +148,8 @@ mod tests {
     #[test]
     fn refresh_updates_and_persists_tokens() {
         let password = format!("password-{}", rand::random::<u64>());
-        let passkey_secret = format!("passkey-{}", rand::random::<u64>());
         let path = temp_path("refresh");
-        let mut vault = Vault::create(
-            &path,
-            Some(password.as_str()),
-            &[("k1".into(), passkey_secret)],
-        )
-        .expect("create vault");
+        let mut vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
 
         let mut unlocked = vault
             .unlock_with_password(password.as_str())
@@ -199,14 +193,8 @@ mod tests {
     #[test]
     fn refresh_skips_unexpired_tokens() {
         let password = format!("password-{}", rand::random::<u64>());
-        let passkey_secret = format!("passkey-{}", rand::random::<u64>());
         let path = temp_path("no-refresh");
-        let vault = Vault::create(
-            &path,
-            Some(password.as_str()),
-            &[("k1".into(), passkey_secret)],
-        )
-        .expect("create vault");
+        let vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
 
         let mut unlocked = vault
             .unlock_with_password(password.as_str())

@@ -243,15 +243,11 @@ impl Vault {
         credential_id: &str,
         passkey_secret: &str,
     ) -> Result<UnlockedVault, VaultError> {
-        let envelope = self
-            .disk
-            .passkey_envelopes
-            .iter()
-            .find(|entry| entry.credential_id == credential_id)
-            .ok_or_else(|| VaultError::InvalidInput("unknown passkey credential id".to_string()))?;
-
-        let master_key = unwrap_key_with_secret(passkey_secret, &envelope.wrapped_master_key)?;
-        self.unlock_with_master_key(master_key)
+        let _ = (credential_id, passkey_secret);
+        Err(VaultError::InvalidInput(
+            "hardware-key unlock is disabled until secure device-backed verification is implemented"
+                .to_string(),
+        ))
     }
 
     pub fn commit(&mut self, unlocked: &UnlockedVault) -> Result<(), VaultError> {
@@ -289,34 +285,11 @@ impl Vault {
         credential_id: &str,
         passkey_secret: &str,
     ) -> Result<(), VaultError> {
-        if credential_id.is_empty() {
-            return Err(VaultError::InvalidInput(
-                "credential_id must not be empty".to_string(),
-            ));
-        }
-        if passkey_secret.is_empty() {
-            return Err(VaultError::InvalidInput(
-                "passkey secret must not be empty".to_string(),
-            ));
-        }
-
-        self.disk
-            .passkey_envelopes
-            .retain(|entry| entry.credential_id != credential_id);
-        self.disk.passkey_envelopes.push(PasskeyEnvelope {
-            credential_id: credential_id.to_string(),
-            wrapped_master_key: wrap_key_with_secret(
-                passkey_secret,
-                unlocked.key(),
-                default_kdf(),
-            )?,
-        });
-
-        validate_recovery_policy(
-            self.disk.password_envelope.is_some(),
-            self.disk.passkey_envelopes.len(),
-        )?;
-        self.persist()
+        let _ = (unlocked, credential_id, passkey_secret);
+        Err(VaultError::InvalidInput(
+            "hardware-key enrollment is disabled until secure device-backed verification is implemented"
+                .to_string(),
+        ))
     }
 
     pub fn revoke_passkey(&mut self, credential_id: &str) -> Result<(), VaultError> {
@@ -376,12 +349,11 @@ impl Vault {
 }
 
 fn validate_recovery_policy(has_password: bool, passkey_count: usize) -> Result<(), VaultError> {
-    if has_password || passkey_count >= 2 {
+    let _ = passkey_count;
+    if has_password {
         return Ok(());
     }
-    Err(VaultError::InvalidData(
-        "vault must have password unlock or at least two passkeys for recovery",
-    ))
+    Err(VaultError::InvalidData("vault must have password unlock"))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -560,14 +532,8 @@ mod tests {
     #[test]
     fn round_trip_encrypts_and_decrypts_token_data() {
         let password = format!("password-{}", rand::random::<u64>());
-        let passkey_secret = format!("passkey-{}", rand::random::<u64>());
         let path = temp_path("roundtrip");
-        let mut vault = Vault::create(
-            &path,
-            Some(password.as_str()),
-            &[("key-1".into(), passkey_secret)],
-        )
-        .expect("create vault");
+        let mut vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
 
         let mut unlocked = vault
             .unlock_with_password(password.as_str())
@@ -603,14 +569,8 @@ mod tests {
     #[test]
     fn tampered_ciphertext_fails_to_decrypt() {
         let password = format!("password-{}", rand::random::<u64>());
-        let passkey_secret = format!("passkey-{}", rand::random::<u64>());
         let path = temp_path("tamper");
-        let vault = Vault::create(
-            &path,
-            Some(password.as_str()),
-            &[("key-1".into(), passkey_secret)],
-        )
-        .expect("create vault");
+        let vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
         let mut disk: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(vault.path()).expect("read persisted vault"))
                 .expect("parse json");
@@ -631,6 +591,21 @@ mod tests {
         let path = temp_path("recovery");
         let err = Vault::create(&path, None, &[("key-1".into(), "secret-1".into())])
             .expect_err("expected recovery-policy error");
+        assert!(matches!(err, VaultError::InvalidData(_)));
+    }
+
+    #[test]
+    fn recovery_policy_rejects_passkey_only_even_with_multiple_keys() {
+        let path = temp_path("recovery-multi-passkey");
+        let err = Vault::create(
+            &path,
+            None,
+            &[
+                ("key-1".into(), "secret-1".into()),
+                ("key-2".into(), "secret-2".into()),
+            ],
+        )
+        .expect_err("expected recovery-policy error");
         assert!(matches!(err, VaultError::InvalidData(_)));
     }
 

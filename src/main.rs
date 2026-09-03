@@ -8,7 +8,7 @@ use alligator::auth::AuthManager;
 use alligator::providers::{
     OAuthRefresher, OAuthSessionManager, RefreshResult, SessionCredentialProvider,
 };
-use alligator::vault::{UnlockedVault, Vault, VaultError};
+use alligator::vault::{UnlockedVault, Vault};
 use alligator::{Bridge, MockBridge, Source, UnifiedTimeline};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::prelude::*;
@@ -63,8 +63,6 @@ enum Screen {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum InputMode {
     UnlockPassword,
-    UnlockSecurityKeyTap,
-    EnrollSecurityKeyTap,
     RotatePassword,
     RevokeSecurityKey,
 }
@@ -130,15 +128,6 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
         }
 
         if auth.is_unlocked() {
-            let now = current_epoch_secs();
-            if let (Some(vault_ref), Some(unlocked)) = (vault.as_mut(), auth.unlocked_mut()) {
-                let refreshed = refresh_manager.refresh_expiring_tokens(unlocked, now)?;
-                if refreshed > 0 {
-                    vault_ref.commit(unlocked)?;
-                    status_message = format!("Refreshed {refreshed} OAuth token(s)");
-                }
-            }
-
             if auth.should_auto_lock() {
                 auth.lock("inactivity_timeout");
                 runtime = None;
@@ -147,6 +136,15 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                 input_mode = None;
                 input_buffer.clear();
                 status_message = "Auto-locked due to inactivity".to_string();
+            } else {
+                let now = current_epoch_secs();
+                if let (Some(vault_ref), Some(unlocked)) = (vault.as_mut(), auth.unlocked_mut()) {
+                    let refreshed = refresh_manager.refresh_expiring_tokens(unlocked, now)?;
+                    if refreshed > 0 {
+                        vault_ref.commit(unlocked)?;
+                        status_message = format!("Refreshed {refreshed} OAuth token(s)");
+                    }
+                }
             }
         }
 
@@ -187,8 +185,6 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                 return Ok(());
             }
 
-            auth.mark_activity();
-
             match screen {
                 Screen::SetupProfile => match edit_input(&mut input_buffer, key, true) {
                     EditAction::Submit => {
@@ -221,16 +217,12 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                 }
                 Screen::Unlock => {
                     if let Some(mode) = input_mode {
-                        let accepts_text = !matches!(mode, InputMode::UnlockSecurityKeyTap);
-                        match edit_input(&mut input_buffer, key, accepts_text) {
+                        match edit_input(&mut input_buffer, key, true) {
                             EditAction::Submit => {
                                 let result = if let Some(vault_ref) = vault.as_ref() {
                                     match mode {
                                         InputMode::UnlockPassword => auth
                                             .unlock_with_password(vault_ref, input_buffer.as_str()),
-                                        InputMode::UnlockSecurityKeyTap => {
-                                            unlock_with_security_key_tap(&mut auth, vault_ref)
-                                        }
                                         _ => Ok(()),
                                     }
                                 } else {
@@ -282,50 +274,40 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                         }
                     }
                 }
-                Screen::Timeline => match key.code {
-                    KeyCode::Up => selected = selected.saturating_sub(1),
-                    KeyCode::Down => {
-                        if selected + 1 < rooms.len() {
-                            selected += 1;
+                Screen::Timeline => {
+                    auth.mark_activity();
+                    match key.code {
+                        KeyCode::Up => selected = selected.saturating_sub(1),
+                        KeyCode::Down => {
+                            if selected + 1 < rooms.len() {
+                                selected += 1;
+                            }
                         }
+                        KeyCode::Char('l') => {
+                            auth.lock("manual_lock");
+                            runtime = None;
+                            screen = Screen::Splash;
+                            splash_entered_at = Instant::now();
+                            status_message = "Locked".to_string();
+                        }
+                        KeyCode::Char('s') => {
+                            screen = Screen::Settings;
+                            input_mode = None;
+                            input_buffer.clear();
+                            status_message = "Settings opened".to_string();
+                        }
+                        _ => {}
                     }
-                    KeyCode::Char('l') => {
-                        auth.lock("manual_lock");
-                        runtime = None;
-                        screen = Screen::Splash;
-                        splash_entered_at = Instant::now();
-                        status_message = "Locked".to_string();
-                    }
-                    KeyCode::Char('s') => {
-                        screen = Screen::Settings;
-                        input_mode = None;
-                        input_buffer.clear();
-                        status_message = "Settings opened".to_string();
-                    }
-                    _ => {}
-                },
+                }
                 Screen::Settings => {
+                    auth.mark_activity();
                     if let Some(mode) = input_mode {
-                        let accepts_text = !matches!(mode, InputMode::EnrollSecurityKeyTap);
-                        match edit_input(&mut input_buffer, key, accepts_text) {
+                        match edit_input(&mut input_buffer, key, true) {
                             EditAction::Submit => {
                                 if let (Some(vault_ref), Some(unlocked)) =
                                     (vault.as_mut(), auth.unlocked_mut())
                                 {
                                     match mode {
-                                        InputMode::EnrollSecurityKeyTap => {
-                                            match enroll_security_key(vault_ref, unlocked) {
-                                                Ok(credential_id) => {
-                                                    status_message = format!(
-                                                        "Security key enrolled. Credential ID: {credential_id}"
-                                                    );
-                                                }
-                                                Err(err) => {
-                                                    status_message =
-                                                        format!("Security update failed: {err}")
-                                                }
-                                            }
-                                        }
                                         InputMode::RotatePassword => match vault_ref
                                             .rotate_password(unlocked, input_buffer.as_str())
                                         {
@@ -396,22 +378,6 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
             }
         }
     }
-}
-
-fn enroll_security_key(vault: &mut Vault, unlocked: &UnlockedVault) -> Result<String, String> {
-    let _ = (vault, unlocked);
-    Err("hardware-key enrollment is disabled until secure device-backed verification is implemented".to_string())
-}
-
-fn unlock_with_security_key_tap(
-    auth: &mut AuthManager,
-    vault: &Vault,
-) -> Result<(), alligator::auth::AuthError> {
-    let _ = (auth, vault);
-    Err(alligator::auth::AuthError::Vault(VaultError::InvalidInput(
-        "hardware-key unlock is disabled until secure device-backed verification is implemented"
-            .to_string(),
-    )))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -692,7 +658,6 @@ fn draw_unlock(
 
     let prompt = match input_mode {
         Some(InputMode::UnlockPassword) => "Password:",
-        Some(InputMode::UnlockSecurityKeyTap) => "Tap security key, then press Enter",
         _ => "",
     };
 
@@ -824,7 +789,6 @@ fn draw_settings(
     );
 
     let prompt = match input_mode {
-        Some(InputMode::EnrollSecurityKeyTap) => "Tap security key, then press Enter",
         Some(InputMode::RotatePassword) => "New password",
         Some(InputMode::RevokeSecurityKey) => "Credential id to revoke",
         _ => "",
@@ -881,18 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn security_key_unlock_is_disabled() {
-        let password = format!("pw-{}", rand::random::<u64>());
-        let path = temp_path("security-key-disabled");
-        let vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
-        let mut auth = AuthManager::new(3, Duration::from_secs(1), Duration::from_secs(60));
-
-        let err = unlock_with_security_key_tap(&mut auth, &vault)
-            .expect_err("security-key unlock should be disabled");
-        assert!(
-            err.to_string().contains("disabled"),
-            "unexpected error: {err}"
-        );
-        assert!(!auth.is_unlocked());
+    fn temp_path_is_unique() {
+        assert_ne!(temp_path("a"), temp_path("a"));
     }
 }

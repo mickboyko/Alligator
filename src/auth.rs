@@ -99,25 +99,12 @@ impl AuthManager {
         credential_id: &str,
         passkey_secret: &str,
     ) -> Result<(), AuthError> {
-        self.ensure_not_rate_limited()?;
-        match vault.unlock_with_passkey(credential_id, passkey_secret) {
-            Ok(unlocked) => {
-                self.audit_log.push("unlock_passkey_success".to_string());
-                self.state = LockState::Unlocked {
-                    method: UnlockMethod::Passkey {
-                        credential_id: credential_id.to_string(),
-                    },
-                    unlocked,
-                    last_activity: Instant::now(),
-                };
-                Ok(())
-            }
-            Err(err) => {
-                self.record_failed_attempt();
-                self.audit_log.push("unlock_passkey_failure".to_string());
-                Err(err.into())
-            }
-        }
+        let _ = (vault, credential_id, passkey_secret);
+        self.audit_log.push("unlock_passkey_disabled".to_string());
+        Err(AuthError::Vault(VaultError::InvalidInput(
+            "hardware-key unlock is disabled until secure device-backed verification is implemented"
+                .to_string(),
+        )))
     }
 
     pub fn lock(&mut self, reason: &str) {
@@ -236,14 +223,8 @@ mod tests {
     #[test]
     fn state_transitions_unlock_and_auto_lock() {
         let password = format!("password-{}", rand::random::<u64>());
-        let passkey_secret = format!("passkey-{}", rand::random::<u64>());
         let path = temp_path("state");
-        let vault = Vault::create(
-            &path,
-            Some(password.as_str()),
-            &[("k1".into(), passkey_secret)],
-        )
-        .expect("create vault");
+        let vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
 
         let mut auth = AuthManager::new(3, Duration::from_secs(30), Duration::from_millis(1));
         auth.unlock_with_password(&vault, password.as_str())
@@ -260,14 +241,8 @@ mod tests {
     #[test]
     fn unlock_rate_limit_enforced_after_failures() {
         let password = format!("password-{}", rand::random::<u64>());
-        let passkey_secret = format!("passkey-{}", rand::random::<u64>());
         let path = temp_path("ratelimit");
-        let vault = Vault::create(
-            &path,
-            Some(password.as_str()),
-            &[("k1".into(), passkey_secret)],
-        )
-        .expect("create vault");
+        let vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
 
         let mut auth = AuthManager::new(2, Duration::from_secs(60), Duration::from_secs(60));
         assert!(auth.unlock_with_password(&vault, "bad").is_err());

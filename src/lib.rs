@@ -281,15 +281,9 @@ mod tests {
     #[test]
     fn mock_bridge_requires_credentials() {
         let password = format!("password-{}", rand::random::<u64>());
-        let passkey_secret = format!("passkey-{}", rand::random::<u64>());
         let (tx, rx) = mpsc::channel();
         let path = temp_path("bridge");
-        let vault = Vault::create(
-            &path,
-            Some(password.as_str()),
-            &[("k1".into(), passkey_secret)],
-        )
-        .expect("create vault");
+        let vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
         let mut unlocked = vault
             .unlock_with_password(password.as_str())
             .expect("unlock");

@@ -282,7 +282,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                 input_mode = Some(InputMode::UnlockSecurityKeyPin);
                                 input_buffer.clear();
                                 status_message =
-                                    "Tap security key, then enter key PIN and press Enter"
+                                    "Enter your security-key PIN (4-16 digits) and press Enter"
                                         .to_string();
                             }
                             _ => {}
@@ -385,7 +385,8 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                 input_mode = Some(InputMode::EnrollSecurityKeyPin);
                                 input_buffer.clear();
                                 status_message =
-                                    "Tap security key and enter a PIN to enroll".to_string();
+                                    "Enter a new security-key PIN (4-16 digits) to enroll"
+                                        .to_string();
                             }
                             KeyCode::Char('r') => {
                                 input_mode = Some(InputMode::RotatePassword);
@@ -413,11 +414,9 @@ fn enroll_security_key(
     unlocked: &UnlockedVault,
     pin: &str,
 ) -> Result<String, String> {
-    if pin.trim().is_empty() {
-        return Err("Security key PIN cannot be empty".to_string());
-    }
+    let pin = normalize_security_key_pin(pin)?;
     let credential_id = generate_security_key_credential_id();
-    let passkey_secret = derive_security_key_secret(credential_id.as_str(), pin)?;
+    let passkey_secret = derive_security_key_secret(credential_id.as_str(), pin.as_str())?;
     vault
         .enroll_passkey(unlocked, credential_id.as_str(), passkey_secret.as_str())
         .map_err(|err| err.to_string())?;
@@ -430,13 +429,9 @@ fn unlock_with_security_key_pin(
     vault: &Vault,
     pin: &str,
 ) -> Result<(), alligator::auth::AuthError> {
-    if pin.trim().is_empty() {
-        return Err(alligator::auth::AuthError::Vault(
-            alligator::vault::VaultError::InvalidInput(
-                "security key PIN cannot be empty".to_string(),
-            ),
-        ));
-    }
+    let pin = normalize_security_key_pin(pin).map_err(|err| {
+        alligator::auth::AuthError::Vault(alligator::vault::VaultError::InvalidInput(err))
+    })?;
 
     let enrolled = vault
         .passkey_ids()
@@ -453,8 +448,8 @@ fn unlock_with_security_key_pin(
     }
 
     for credential_id in &enrolled {
-        let passkey_secret =
-            derive_security_key_secret(credential_id.as_str(), pin).map_err(|err| {
+        let passkey_secret = derive_security_key_secret(credential_id.as_str(), pin.as_str())
+            .map_err(|err| {
                 alligator::auth::AuthError::Vault(alligator::vault::VaultError::InvalidInput(err))
             })?;
         match vault.unlock_with_passkey(credential_id.as_str(), passkey_secret.as_str()) {
@@ -470,9 +465,10 @@ fn unlock_with_security_key_pin(
     }
 
     if let Some(first_credential) = enrolled.first() {
-        let secret = derive_security_key_secret(first_credential.as_str(), pin).map_err(|err| {
-            alligator::auth::AuthError::Vault(alligator::vault::VaultError::InvalidInput(err))
-        })?;
+        let secret =
+            derive_security_key_secret(first_credential.as_str(), pin.as_str()).map_err(|err| {
+                alligator::auth::AuthError::Vault(alligator::vault::VaultError::InvalidInput(err))
+            })?;
         return auth.unlock_with_passkey(vault, first_credential.as_str(), secret.as_str());
     }
 
@@ -502,6 +498,20 @@ fn derive_security_key_secret(credential_id: &str, pin: &str) -> Result<String, 
         .map_err(|_| "failed to derive security key secret".to_string())?;
 
     Ok(base64::engine::general_purpose::STANDARD.encode(out))
+}
+
+fn normalize_security_key_pin(pin: &str) -> Result<String, String> {
+    let trimmed = pin.trim();
+    if trimmed.is_empty() {
+        return Err("security key PIN cannot be empty".to_string());
+    }
+    if !(4..=16).contains(&trimmed.len()) {
+        return Err("security key PIN must be 4-16 digits".to_string());
+    }
+    if !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("security key PIN must contain digits only".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -768,7 +778,7 @@ fn draw_unlock(
         })
         .unwrap_or_default();
     let help = format!(
-        "Authenticate to unlock local encrypted profile.\n[p] Password\n[k] Physical security key (tap key, then enter key PIN)\nConfigured security keys: {credential_count}",
+        "Authenticate to unlock local encrypted profile.\n[p] Password\n[k] Physical security key (enter enrolled PIN)\nConfigured security keys: {credential_count}",
     );
 
     frame.render_widget(
@@ -780,7 +790,7 @@ fn draw_unlock(
 
     let prompt = match input_mode {
         Some(InputMode::UnlockPassword) => "Password:",
-        Some(InputMode::UnlockSecurityKeyPin) => "Security key PIN:",
+        Some(InputMode::UnlockSecurityKeyPin) => "Security key PIN (4-16 digits):",
         _ => "",
     };
 
@@ -901,7 +911,7 @@ fn draw_settings(
         })
         .unwrap_or_default();
     let text = format!(
-        "Authentication settings\n[e] Enroll physical security key (tap key + set PIN)\n[r] Rotate password\n[x] Revoke credential\n[l] Lock now\n[b] Back to timeline\nConfigured security keys: {credential_count}",
+        "Authentication settings\n[e] Enroll physical security key (set PIN)\n[r] Rotate password\n[x] Revoke credential\n[l] Lock now\n[b] Back to timeline\nConfigured security keys: {credential_count}",
     );
 
     frame.render_widget(
@@ -912,7 +922,7 @@ fn draw_settings(
     );
 
     let prompt = match input_mode {
-        Some(InputMode::EnrollSecurityKeyPin) => "Security key PIN for enrollment",
+        Some(InputMode::EnrollSecurityKeyPin) => "New security key PIN (4-16 digits)",
         Some(InputMode::RotatePassword) => "New password",
         Some(InputMode::RevokeSecurityKey) => "Credential id to revoke",
         _ => "",

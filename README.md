@@ -35,14 +35,14 @@ After setup, use any key on splash to open login.
 
 - Unlock methods:
   - `p` → password unlock
-  - `k` → security-key unlock (tap key, then enter key PIN)
+  - `k` → security-key unlock (enter enrolled key PIN)
 - Timeline actions:
   - `↑` / `↓` → move selected room
   - `l` → lock immediately (returns to splash)
   - `s` → open authentication settings
 - Authentication settings actions:
   - `l` → lock immediately
-  - `e` → enroll security key (tap key and set PIN for local profile binding)
+  - `e` → enroll security key (set a 4-16 digit PIN for local profile binding)
   - `r` → rotate password
   - `x` → revoke key credential by ID (for example `fido2:local:12ab34cd-56ef7890`)
   - `b` → back to timeline
@@ -51,4 +51,5 @@ After setup, use any key on splash to open login.
 
 - Uses a vendor-neutral local FIDO2-style credential flow for physical keys.
 - Enrollment stores a generated `fido2:` credential bound to your local profile and key PIN.
+- PIN format is enforced as digits only, 4-16 characters.
 - Login with `k` attempts authentication against enrolled `fido2:` credentials using the entered PIN.

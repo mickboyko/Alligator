@@ -50,5 +50,8 @@ After setup, use any key on splash to open login.
 ## YubiKey integration notes
 
 - Uses the `yubikey` crate (PIV/PCSC path).
+- Build with YubiKey support enabled:
+  - `cargo run --features yubikey-auth`
+- Linux requires PCSC headers/runtime (e.g. `libpcsclite-dev`).
 - Enrollment verifies PIN on the connected key and stores a credential ID tied to that key serial.
 - Key login checks for an enrolled key serial and verifies PIN before unlocking.

@@ -315,10 +315,11 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                         )
                                         .map(|_| ()),
                                         InputMode::RotatePassword => vault_ref
-                                            .rotate_password(unlocked, input_buffer.as_str()),
-                                        InputMode::RevokeYubiKey => {
-                                            vault_ref.revoke_passkey(input_buffer.as_str())
-                                        }
+                                            .rotate_password(unlocked, input_buffer.as_str())
+                                            .map_err(|err| err.to_string()),
+                                        InputMode::RevokeYubiKey => vault_ref
+                                            .revoke_passkey(input_buffer.as_str())
+                                            .map_err(|err| err.to_string()),
                                         _ => Ok(()),
                                     };
 
@@ -409,8 +410,10 @@ fn enroll_yubikey(
     _unlocked: &UnlockedVault,
     _pin: &str,
 ) -> Result<String, String> {
-    Err("YubiKey support is disabled in this build. Rebuild with --features yubikey-auth"
-        .to_string())
+    Err(
+        "YubiKey support is disabled in this build. Rebuild with --features yubikey-auth"
+            .to_string(),
+    )
 }
 
 #[cfg(feature = "yubikey-auth")]
@@ -423,20 +426,6 @@ fn unlock_with_yubikey_pin(
         return Err(alligator::auth::AuthError::Vault(
             alligator::vault::VaultError::InvalidInput("YubiKey PIN cannot be empty".to_string()),
         ));
-    }
-
-    #[cfg(not(feature = "yubikey-auth"))]
-    fn unlock_with_yubikey_pin(
-        _auth: &mut AuthManager,
-        _vault: &Vault,
-        _pin: &str,
-    ) -> Result<(), alligator::auth::AuthError> {
-        Err(alligator::auth::AuthError::Vault(
-            alligator::vault::VaultError::InvalidInput(
-                "YubiKey support is disabled in this build. Rebuild with --features yubikey-auth"
-                    .to_string(),
-            ),
-        ))
     }
 
     let enrolled = vault
@@ -485,6 +474,20 @@ fn unlock_with_yubikey_pin(
 
     Err(alligator::auth::AuthError::Vault(
         alligator::vault::VaultError::InvalidInput("yubikey login failed".to_string()),
+    ))
+}
+
+#[cfg(not(feature = "yubikey-auth"))]
+fn unlock_with_yubikey_pin(
+    _auth: &mut AuthManager,
+    _vault: &Vault,
+    _pin: &str,
+) -> Result<(), alligator::auth::AuthError> {
+    Err(alligator::auth::AuthError::Vault(
+        alligator::vault::VaultError::InvalidInput(
+            "YubiKey support is disabled in this build. Rebuild with --features yubikey-auth"
+                .to_string(),
+        ),
     ))
 }
 

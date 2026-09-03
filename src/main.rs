@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use alligator::{Bridge, MockBridge, Source, UnifiedTimeline};
 use crossterm::event::{self, Event, KeyCode};
@@ -8,7 +8,6 @@ use ratatui::prelude::*;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
-const SPLASH_DURATION: Duration = Duration::from_secs(3);
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SPLASH_ART: &[&str] = &[
     "                          ..........                                                                ",
@@ -116,7 +115,6 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
 
     let mut timeline = UnifiedTimeline::new();
     let mut selected = 0usize;
-    let splash_started = Instant::now();
     let mut screen = Screen::Splash;
 
     loop {
@@ -129,10 +127,6 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
             selected = rooms.len() - 1;
         }
 
-        if screen == Screen::Splash && splash_started.elapsed() >= SPLASH_DURATION {
-            screen = Screen::Timeline;
-        }
-
         terminal.draw(|frame| draw(frame, &rooms, selected, screen))?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -140,7 +134,8 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                 match screen {
                     Screen::Splash => match key.code {
                         KeyCode::Char('q') => return Ok(()),
-                        _ => screen = Screen::Timeline,
+                        KeyCode::Enter => screen = Screen::Timeline,
+                        _ => {}
                     },
                     Screen::Timeline => match key.code {
                         KeyCode::Char('q') => return Ok(()),
@@ -219,7 +214,7 @@ fn draw_splash(frame: &mut Frame) {
         layout[1],
     );
     frame.render_widget(
-        Paragraph::new("[ press any key to continue | q quits ]")
+        Paragraph::new("[ press Enter to continue | q quits ]")
             .style(accent)
             .alignment(Alignment::Center),
         layout[2],

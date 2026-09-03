@@ -21,4 +21,4 @@ cargo run
 ```
 
 Use `↑` / `↓` to change selected room and `q` to quit.
-Press any key to dismiss the splash screen immediately, or wait for it to continue automatically.
+Press `Enter` to proceed from the splash screen, or `q` to quit.

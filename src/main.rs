@@ -10,13 +10,10 @@ use alligator::providers::{
 };
 use alligator::vault::{UnlockedVault, Vault};
 use alligator::{Bridge, MockBridge, Source, UnifiedTimeline};
-use argon2::{Algorithm, Argon2, Params, Version};
-use base64::Engine;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::prelude::*;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
-use sha2::{Digest, Sha256};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SPLASH_DURATION: Duration = Duration::from_secs(3);
@@ -66,8 +63,8 @@ enum Screen {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum InputMode {
     UnlockPassword,
-    UnlockSecurityKeyPin,
-    EnrollSecurityKeyPin,
+    UnlockSecurityKeyTap,
+    EnrollSecurityKeyTap,
     RotatePassword,
     RevokeSecurityKey,
 }
@@ -193,7 +190,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
             auth.mark_activity();
 
             match screen {
-                Screen::SetupProfile => match edit_input(&mut input_buffer, key) {
+                Screen::SetupProfile => match edit_input(&mut input_buffer, key, true) {
                     EditAction::Submit => {
                         let password = input_buffer.trim();
                         if password.is_empty() {
@@ -224,18 +221,15 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                 }
                 Screen::Unlock => {
                     if let Some(mode) = input_mode {
-                        match edit_input(&mut input_buffer, key) {
+                        let accepts_text = !matches!(mode, InputMode::UnlockSecurityKeyTap);
+                        match edit_input(&mut input_buffer, key, accepts_text) {
                             EditAction::Submit => {
                                 let result = if let Some(vault_ref) = vault.as_ref() {
                                     match mode {
                                         InputMode::UnlockPassword => auth
                                             .unlock_with_password(vault_ref, input_buffer.as_str()),
-                                        InputMode::UnlockSecurityKeyPin => {
-                                            unlock_with_security_key_pin(
-                                                &mut auth,
-                                                vault_ref,
-                                                input_buffer.as_str(),
-                                            )
+                                        InputMode::UnlockSecurityKeyTap => {
+                                            unlock_with_security_key_tap(&mut auth, vault_ref)
                                         }
                                         _ => Ok(()),
                                     }
@@ -279,11 +273,10 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                 status_message = "Enter password and press Enter".to_string();
                             }
                             KeyCode::Char('k') => {
-                                input_mode = Some(InputMode::UnlockSecurityKeyPin);
+                                input_mode = Some(InputMode::UnlockSecurityKeyTap);
                                 input_buffer.clear();
                                 status_message =
-                                    "Enter your security-key PIN (4-16 digits) and press Enter"
-                                        .to_string();
+                                    "Tap your hardware key, then press Enter".to_string();
                             }
                             _ => {}
                         }
@@ -313,18 +306,15 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                 },
                 Screen::Settings => {
                     if let Some(mode) = input_mode {
-                        match edit_input(&mut input_buffer, key) {
+                        let accepts_text = !matches!(mode, InputMode::EnrollSecurityKeyTap);
+                        match edit_input(&mut input_buffer, key, accepts_text) {
                             EditAction::Submit => {
                                 if let (Some(vault_ref), Some(unlocked)) =
                                     (vault.as_mut(), auth.unlocked_mut())
                                 {
                                     match mode {
-                                        InputMode::EnrollSecurityKeyPin => {
-                                            match enroll_security_key(
-                                                vault_ref,
-                                                unlocked,
-                                                input_buffer.as_str(),
-                                            ) {
+                                        InputMode::EnrollSecurityKeyTap => {
+                                            match enroll_security_key(vault_ref, unlocked) {
                                                 Ok(credential_id) => {
                                                     status_message = format!(
                                                         "Security key enrolled. Credential ID: {credential_id}"
@@ -382,11 +372,10 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                 status_message = "Locked".to_string();
                             }
                             KeyCode::Char('e') => {
-                                input_mode = Some(InputMode::EnrollSecurityKeyPin);
+                                input_mode = Some(InputMode::EnrollSecurityKeyTap);
                                 input_buffer.clear();
                                 status_message =
-                                    "Enter a new security-key PIN (4-16 digits) to enroll"
-                                        .to_string();
+                                    "Tap your hardware key, then press Enter to enroll".to_string();
                             }
                             KeyCode::Char('r') => {
                                 input_mode = Some(InputMode::RotatePassword);
@@ -409,14 +398,9 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
     }
 }
 
-fn enroll_security_key(
-    vault: &mut Vault,
-    unlocked: &UnlockedVault,
-    pin: &str,
-) -> Result<String, String> {
-    let pin = normalize_security_key_pin(pin)?;
+fn enroll_security_key(vault: &mut Vault, unlocked: &UnlockedVault) -> Result<String, String> {
     let credential_id = generate_security_key_credential_id();
-    let passkey_secret = derive_security_key_secret(credential_id.as_str(), pin.as_str())?;
+    let passkey_secret = credential_id.clone();
     vault
         .enroll_passkey(unlocked, credential_id.as_str(), passkey_secret.as_str())
         .map_err(|err| err.to_string())?;
@@ -424,15 +408,10 @@ fn enroll_security_key(
     Ok(credential_id)
 }
 
-fn unlock_with_security_key_pin(
+fn unlock_with_security_key_tap(
     auth: &mut AuthManager,
     vault: &Vault,
-    pin: &str,
 ) -> Result<(), alligator::auth::AuthError> {
-    let pin = normalize_security_key_pin(pin).map_err(|err| {
-        alligator::auth::AuthError::Vault(alligator::vault::VaultError::InvalidInput(err))
-    })?;
-
     let enrolled = vault
         .passkey_ids()
         .filter(|credential_id| credential_id.starts_with("fido2:"))
@@ -448,28 +427,18 @@ fn unlock_with_security_key_pin(
     }
 
     for credential_id in &enrolled {
-        let passkey_secret = derive_security_key_secret(credential_id.as_str(), pin.as_str())
-            .map_err(|err| {
-                alligator::auth::AuthError::Vault(alligator::vault::VaultError::InvalidInput(err))
-            })?;
-        match vault.unlock_with_passkey(credential_id.as_str(), passkey_secret.as_str()) {
+        let passkey_secret = credential_id.as_str();
+        match vault.unlock_with_passkey(credential_id.as_str(), passkey_secret) {
             Ok(_) => {
-                return auth.unlock_with_passkey(
-                    vault,
-                    credential_id.as_str(),
-                    passkey_secret.as_str(),
-                );
+                return auth.unlock_with_passkey(vault, credential_id.as_str(), passkey_secret);
             }
             Err(_) => continue,
         }
     }
 
     if let Some(first_credential) = enrolled.first() {
-        let secret =
-            derive_security_key_secret(first_credential.as_str(), pin.as_str()).map_err(|err| {
-                alligator::auth::AuthError::Vault(alligator::vault::VaultError::InvalidInput(err))
-            })?;
-        return auth.unlock_with_passkey(vault, first_credential.as_str(), secret.as_str());
+        let secret = first_credential.as_str();
+        return auth.unlock_with_passkey(vault, first_credential.as_str(), secret);
     }
 
     Err(alligator::auth::AuthError::Vault(
@@ -483,37 +452,6 @@ fn generate_security_key_credential_id() -> String {
     format!("fido2:local:{}-{}", &encoded[..8], &encoded[8..])
 }
 
-fn derive_security_key_secret(credential_id: &str, pin: &str) -> Result<String, String> {
-    let mut salt_hasher = Sha256::new();
-    salt_hasher.update("alligator-local-fido2-salt");
-    salt_hasher.update(credential_id.as_bytes());
-    let salt = salt_hasher.finalize();
-
-    let params = Params::new(19_456, 2, 1, Some(32))
-        .map_err(|_| "failed to prepare key-derivation parameters".to_string())?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut out = [0u8; 32];
-    argon2
-        .hash_password_into(pin.as_bytes(), &salt[..16], &mut out)
-        .map_err(|_| "failed to derive security key secret".to_string())?;
-
-    Ok(base64::engine::general_purpose::STANDARD.encode(out))
-}
-
-fn normalize_security_key_pin(pin: &str) -> Result<String, String> {
-    let trimmed = pin.trim();
-    if trimmed.is_empty() {
-        return Err("security key PIN cannot be empty".to_string());
-    }
-    if !(4..=16).contains(&trimmed.len()) {
-        return Err("security key PIN must be 4-16 digits".to_string());
-    }
-    if !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
-        return Err("security key PIN must contain digits only".to_string());
-    }
-    Ok(trimmed.to_string())
-}
-
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum EditAction {
     Continue,
@@ -521,11 +459,13 @@ enum EditAction {
     Cancel,
 }
 
-fn edit_input(buffer: &mut String, key: KeyEvent) -> EditAction {
+fn edit_input(buffer: &mut String, key: KeyEvent, accepts_text: bool) -> EditAction {
     match key.code {
-        KeyCode::Char(c) => buffer.push(c),
+        KeyCode::Char(c) if accepts_text => buffer.push(c),
         KeyCode::Backspace => {
-            buffer.pop();
+            if accepts_text {
+                buffer.pop();
+            }
         }
         KeyCode::Enter => return EditAction::Submit,
         KeyCode::Esc => return EditAction::Cancel,
@@ -778,7 +718,7 @@ fn draw_unlock(
         })
         .unwrap_or_default();
     let help = format!(
-        "Authenticate to unlock local encrypted profile.\n[p] Password\n[k] Physical security key (enter enrolled PIN)\nConfigured security keys: {credential_count}",
+        "Authenticate to unlock local encrypted profile.\n[p] Password\n[k] Physical security key (tap key and press Enter)\nConfigured security keys: {credential_count}",
     );
 
     frame.render_widget(
@@ -790,7 +730,7 @@ fn draw_unlock(
 
     let prompt = match input_mode {
         Some(InputMode::UnlockPassword) => "Password:",
-        Some(InputMode::UnlockSecurityKeyPin) => "Security key PIN (4-16 digits):",
+        Some(InputMode::UnlockSecurityKeyTap) => "Tap security key, then press Enter",
         _ => "",
     };
 
@@ -911,7 +851,7 @@ fn draw_settings(
         })
         .unwrap_or_default();
     let text = format!(
-        "Authentication settings\n[e] Enroll physical security key (set PIN)\n[r] Rotate password\n[x] Revoke credential\n[l] Lock now\n[b] Back to timeline\nConfigured security keys: {credential_count}",
+        "Authentication settings\n[e] Enroll physical security key (tap key + Enter)\n[r] Rotate password\n[x] Revoke credential\n[l] Lock now\n[b] Back to timeline\nConfigured security keys: {credential_count}",
     );
 
     frame.render_widget(
@@ -922,7 +862,7 @@ fn draw_settings(
     );
 
     let prompt = match input_mode {
-        Some(InputMode::EnrollSecurityKeyPin) => "New security key PIN (4-16 digits)",
+        Some(InputMode::EnrollSecurityKeyTap) => "Tap security key, then press Enter",
         Some(InputMode::RotatePassword) => "New password",
         Some(InputMode::RevokeSecurityKey) => "Credential id to revoke",
         _ => "",
@@ -950,10 +890,7 @@ fn draw_settings(
 fn is_secret_input_mode(input_mode: Option<InputMode>) -> bool {
     matches!(
         input_mode,
-        Some(InputMode::UnlockPassword)
-            | Some(InputMode::UnlockSecurityKeyPin)
-            | Some(InputMode::EnrollSecurityKeyPin)
-            | Some(InputMode::RotatePassword)
+        Some(InputMode::UnlockPassword) | Some(InputMode::RotatePassword)
     )
 }
 

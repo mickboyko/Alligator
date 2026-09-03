@@ -10,14 +10,16 @@ use alligator::providers::{
 };
 use alligator::vault::{UnlockedVault, Vault};
 use alligator::{Bridge, MockBridge, Source, UnifiedTimeline};
+use argon2::{Algorithm, Argon2, Params, Version};
+use base64::Engine;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::prelude::*;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
-#[cfg(feature = "yubikey-auth")]
-use yubikey::{Serial, YubiKey};
+use sha2::{Digest, Sha256};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SPLASH_DURATION: Duration = Duration::from_secs(3);
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(90);
 const LOCK_COOLDOWN: Duration = Duration::from_secs(10);
 const MAX_FAILED_ATTEMPTS: u32 = 3;
@@ -64,10 +66,10 @@ enum Screen {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum InputMode {
     UnlockPassword,
-    UnlockPasskeyPin,
-    EnrollYubiKeyPin,
+    UnlockSecurityKeyPin,
+    EnrollSecurityKeyPin,
     RotatePassword,
-    RevokeYubiKey,
+    RevokeSecurityKey,
 }
 
 struct BridgeRuntime {
@@ -123,6 +125,13 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
     let mut splash_entered_at = Instant::now();
 
     loop {
+        if screen == Screen::Splash && splash_entered_at.elapsed() >= SPLASH_DURATION {
+            screen = Screen::Unlock;
+            input_mode = None;
+            input_buffer.clear();
+            status_message = "Choose unlock method".to_string();
+        }
+
         if auth.is_unlocked() {
             let now = current_epoch_secs();
             if let (Some(vault_ref), Some(unlocked)) = (vault.as_mut(), auth.unlocked_mut()) {
@@ -186,14 +195,14 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
             match screen {
                 Screen::SetupProfile => match edit_input(&mut input_buffer, key) {
                     EditAction::Submit => {
-                        if input_buffer.trim().is_empty() {
+                        let password = input_buffer.trim();
+                        if password.is_empty() {
                             status_message = "Password cannot be empty".to_string();
                             continue;
                         }
 
-                        let mut created =
-                            Vault::create(&profile_path, Some(input_buffer.as_str()), &[])?;
-                        let mut unlocked = created.unlock_with_password(input_buffer.as_str())?;
+                        let mut created = Vault::create(&profile_path, Some(password), &[])?;
+                        let mut unlocked = created.unlock_with_password(password)?;
                         seed_demo_tokens(&mut unlocked);
                         created.commit(&unlocked)?;
                         vault = Some(created);
@@ -208,12 +217,10 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                     EditAction::Continue => {}
                 },
                 Screen::Splash => {
-                    if splash_entered_at.elapsed() >= Duration::from_millis(100) {
-                        screen = Screen::Unlock;
-                        input_mode = None;
-                        input_buffer.clear();
-                        status_message = "Choose unlock method".to_string();
-                    }
+                    screen = Screen::Unlock;
+                    input_mode = None;
+                    input_buffer.clear();
+                    status_message = "Choose unlock method".to_string();
                 }
                 Screen::Unlock => {
                     if let Some(mode) = input_mode {
@@ -223,11 +230,13 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                     match mode {
                                         InputMode::UnlockPassword => auth
                                             .unlock_with_password(vault_ref, input_buffer.as_str()),
-                                        InputMode::UnlockPasskeyPin => unlock_with_yubikey_pin(
-                                            &mut auth,
-                                            vault_ref,
-                                            input_buffer.as_str(),
-                                        ),
+                                        InputMode::UnlockSecurityKeyPin => {
+                                            unlock_with_security_key_pin(
+                                                &mut auth,
+                                                vault_ref,
+                                                input_buffer.as_str(),
+                                            )
+                                        }
                                         _ => Ok(()),
                                     }
                                 } else {
@@ -270,9 +279,11 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                 status_message = "Enter password and press Enter".to_string();
                             }
                             KeyCode::Char('k') => {
-                                input_mode = Some(InputMode::UnlockPasskeyPin);
+                                input_mode = Some(InputMode::UnlockSecurityKeyPin);
                                 input_buffer.clear();
-                                status_message = "Insert enrolled YubiKey/Windows Hello security key and enter key PIN then Enter".to_string();
+                                status_message =
+                                    "Tap security key, then enter key PIN and press Enter"
+                                        .to_string();
                             }
                             _ => {}
                         }
@@ -307,30 +318,48 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                 if let (Some(vault_ref), Some(unlocked)) =
                                     (vault.as_mut(), auth.unlocked_mut())
                                 {
-                                    let op = match mode {
-                                        InputMode::EnrollYubiKeyPin => enroll_yubikey(
-                                            vault_ref,
-                                            unlocked,
-                                            input_buffer.as_str(),
-                                        )
-                                        .map(|_| ()),
-                                        InputMode::RotatePassword => vault_ref
+                                    match mode {
+                                        InputMode::EnrollSecurityKeyPin => {
+                                            match enroll_security_key(
+                                                vault_ref,
+                                                unlocked,
+                                                input_buffer.as_str(),
+                                            ) {
+                                                Ok(credential_id) => {
+                                                    status_message = format!(
+                                                        "Security key enrolled. Credential ID: {credential_id}"
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    status_message =
+                                                        format!("Security update failed: {err}")
+                                                }
+                                            }
+                                        }
+                                        InputMode::RotatePassword => match vault_ref
                                             .rotate_password(unlocked, input_buffer.as_str())
-                                            .map_err(|err| err.to_string()),
-                                        InputMode::RevokeYubiKey => vault_ref
+                                        {
+                                            Ok(()) => {
+                                                status_message =
+                                                    "Password updated successfully".to_string()
+                                            }
+                                            Err(err) => {
+                                                status_message =
+                                                    format!("Security update failed: {err}")
+                                            }
+                                        },
+                                        InputMode::RevokeSecurityKey => match vault_ref
                                             .revoke_passkey(input_buffer.as_str())
-                                            .map_err(|err| err.to_string()),
-                                        _ => Ok(()),
-                                    };
-
-                                    match op {
-                                        Ok(()) => {
-                                            status_message = "Security settings updated".to_string()
-                                        }
-                                        Err(err) => {
-                                            status_message =
-                                                format!("Security update failed: {err}")
-                                        }
+                                        {
+                                            Ok(()) => {
+                                                status_message = "Security key revoked".to_string()
+                                            }
+                                            Err(err) => {
+                                                status_message =
+                                                    format!("Security update failed: {err}")
+                                            }
+                                        },
+                                        _ => {}
                                     }
                                 }
                                 input_mode = None;
@@ -353,10 +382,10 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                 status_message = "Locked".to_string();
                             }
                             KeyCode::Char('e') => {
-                                input_mode = Some(InputMode::EnrollYubiKeyPin);
+                                input_mode = Some(InputMode::EnrollSecurityKeyPin);
                                 input_buffer.clear();
                                 status_message =
-                                    "Insert YubiKey and enter its PIN to enroll".to_string();
+                                    "Tap security key and enter a PIN to enroll".to_string();
                             }
                             KeyCode::Char('r') => {
                                 input_mode = Some(InputMode::RotatePassword);
@@ -364,10 +393,10 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
                                 status_message = "Enter new password then Enter".to_string();
                             }
                             KeyCode::Char('x') => {
-                                input_mode = Some(InputMode::RevokeYubiKey);
+                                input_mode = Some(InputMode::RevokeSecurityKey);
                                 input_buffer.clear();
                                 status_message =
-                                    "Enter credential id to revoke (e.g. yubikey:12345678)"
+                                    "Enter credential id to revoke (e.g. fido2:local:123456)"
                                         .to_string();
                             }
                             _ => {}
@@ -379,24 +408,16 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
     }
 }
 
-#[cfg(feature = "yubikey-auth")]
-fn enroll_yubikey(
+fn enroll_security_key(
     vault: &mut Vault,
     unlocked: &UnlockedVault,
     pin: &str,
 ) -> Result<String, String> {
     if pin.trim().is_empty() {
-        return Err("YubiKey PIN cannot be empty".to_string());
+        return Err("Security key PIN cannot be empty".to_string());
     }
-
-    let mut yubikey = YubiKey::open().map_err(|err| format!("no YubiKey detected: {err}"))?;
-    yubikey
-        .verify_pin(pin.as_bytes())
-        .map_err(|err| format!("failed to verify YubiKey PIN: {err}"))?;
-
-    let serial: u32 = yubikey.serial().into();
-    let credential_id = format!("yubikey:{serial}");
-    let passkey_secret = format!("yubikey-piv:{serial}:{pin}");
+    let credential_id = generate_security_key_credential_id();
+    let passkey_secret = derive_security_key_secret(credential_id.as_str(), pin)?;
     vault
         .enroll_passkey(unlocked, credential_id.as_str(), passkey_secret.as_str())
         .map_err(|err| err.to_string())?;
@@ -404,91 +425,83 @@ fn enroll_yubikey(
     Ok(credential_id)
 }
 
-#[cfg(not(feature = "yubikey-auth"))]
-fn enroll_yubikey(
-    _vault: &mut Vault,
-    _unlocked: &UnlockedVault,
-    _pin: &str,
-) -> Result<String, String> {
-    Err(
-        "YubiKey support is disabled in this build. Rebuild with --features yubikey-auth"
-            .to_string(),
-    )
-}
-
-#[cfg(feature = "yubikey-auth")]
-fn unlock_with_yubikey_pin(
+fn unlock_with_security_key_pin(
     auth: &mut AuthManager,
     vault: &Vault,
     pin: &str,
 ) -> Result<(), alligator::auth::AuthError> {
     if pin.trim().is_empty() {
         return Err(alligator::auth::AuthError::Vault(
-            alligator::vault::VaultError::InvalidInput("YubiKey PIN cannot be empty".to_string()),
+            alligator::vault::VaultError::InvalidInput(
+                "security key PIN cannot be empty".to_string(),
+            ),
         ));
     }
 
     let enrolled = vault
         .passkey_ids()
-        .filter_map(|credential_id| {
-            credential_id
-                .strip_prefix("yubikey:")
-                .and_then(|serial| serial.parse::<u32>().ok())
-                .map(|serial| (credential_id.to_string(), serial))
-        })
+        .filter(|credential_id| credential_id.starts_with("fido2:"))
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
 
     if enrolled.is_empty() {
         return Err(alligator::auth::AuthError::Vault(
             alligator::vault::VaultError::InvalidInput(
-                "no enrolled yubikey credentials".to_string(),
+                "no enrolled security-key credentials".to_string(),
             ),
         ));
     }
 
-    let mut saw_matching_device = false;
-    for (credential_id, serial_num) in enrolled {
-        let mut yubikey = match YubiKey::open_by_serial(Serial::from(serial_num)) {
-            Ok(yubikey) => yubikey,
+    for credential_id in &enrolled {
+        let passkey_secret =
+            derive_security_key_secret(credential_id.as_str(), pin).map_err(|err| {
+                alligator::auth::AuthError::Vault(alligator::vault::VaultError::InvalidInput(err))
+            })?;
+        match vault.unlock_with_passkey(credential_id.as_str(), passkey_secret.as_str()) {
+            Ok(_) => {
+                return auth.unlock_with_passkey(
+                    vault,
+                    credential_id.as_str(),
+                    passkey_secret.as_str(),
+                );
+            }
             Err(_) => continue,
-        };
-        saw_matching_device = true;
-
-        yubikey.verify_pin(pin.as_bytes()).map_err(|err| {
-            alligator::auth::AuthError::Vault(alligator::vault::VaultError::InvalidInput(format!(
-                "failed to verify yubikey pin: {err}"
-            )))
-        })?;
-
-        let passkey_secret = format!("yubikey-piv:{serial_num}:{pin}");
-        return auth.unlock_with_passkey(vault, credential_id.as_str(), passkey_secret.as_str());
+        }
     }
 
-    if !saw_matching_device {
-        return Err(alligator::auth::AuthError::Vault(
-            alligator::vault::VaultError::InvalidInput(
-                "no enrolled yubikey is connected".to_string(),
-            ),
-        ));
+    if let Some(first_credential) = enrolled.first() {
+        let secret = derive_security_key_secret(first_credential.as_str(), pin).map_err(|err| {
+            alligator::auth::AuthError::Vault(alligator::vault::VaultError::InvalidInput(err))
+        })?;
+        return auth.unlock_with_passkey(vault, first_credential.as_str(), secret.as_str());
     }
 
     Err(alligator::auth::AuthError::Vault(
-        alligator::vault::VaultError::InvalidInput("yubikey login failed".to_string()),
+        alligator::vault::VaultError::InvalidInput("security-key login failed".to_string()),
     ))
 }
 
-#[cfg(not(feature = "yubikey-auth"))]
-fn unlock_with_yubikey_pin(
-    _auth: &mut AuthManager,
-    _vault: &Vault,
-    _pin: &str,
-) -> Result<(), alligator::auth::AuthError> {
-    Err(alligator::auth::AuthError::Vault(
-        alligator::vault::VaultError::InvalidInput(
-            "YubiKey support is disabled in this build. Rebuild with --features yubikey-auth"
-                .to_string(),
-        ),
-    ))
+fn generate_security_key_credential_id() -> String {
+    let value = rand::random::<u64>();
+    let encoded = format!("{value:016x}");
+    format!("fido2:local:{}-{}", &encoded[..8], &encoded[8..])
+}
+
+fn derive_security_key_secret(credential_id: &str, pin: &str) -> Result<String, String> {
+    let mut salt_hasher = Sha256::new();
+    salt_hasher.update("alligator-local-fido2-salt");
+    salt_hasher.update(credential_id.as_bytes());
+    let salt = salt_hasher.finalize();
+
+    let params = Params::new(19_456, 2, 1, Some(32))
+        .map_err(|_| "failed to prepare key-derivation parameters".to_string())?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut out = [0u8; 32];
+    argon2
+        .hash_password_into(pin.as_bytes(), &salt[..16], &mut out)
+        .map_err(|_| "failed to derive security key secret".to_string())?;
+
+    Ok(base64::engine::general_purpose::STANDARD.encode(out))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -649,8 +662,9 @@ fn draw_setup_profile(frame: &mut Frame, input_buffer: &str, status_message: &st
         layout[0],
     );
 
+    let masked_password = masked_input(input_buffer);
     frame.render_widget(
-        Paragraph::new(format!("Password: {input_buffer}")).block(
+        Paragraph::new(format!("Password: {masked_password}")).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("New password (Enter to create)"),
@@ -745,16 +759,16 @@ fn draw_unlock(
         ])
         .split(frame.area());
 
-    let passkeys = vault
-        .map(|vault| vault.passkey_ids().collect::<Vec<_>>().join(", "))
+    let credential_count = vault
+        .map(|vault| {
+            vault
+                .passkey_ids()
+                .filter(|id| id.starts_with("fido2:"))
+                .count()
+        })
         .unwrap_or_default();
     let help = format!(
-        "Authenticate to unlock local encrypted profile.\n[p] Password\n[k] Physical key / Windows Hello (YubiKey PIV PIN)\nConfigured credentials: {}",
-        if passkeys.is_empty() {
-            "none"
-        } else {
-            passkeys.as_str()
-        }
+        "Authenticate to unlock local encrypted profile.\n[p] Password\n[k] Physical security key (tap key, then enter key PIN)\nConfigured security keys: {credential_count}",
     );
 
     frame.render_widget(
@@ -766,12 +780,17 @@ fn draw_unlock(
 
     let prompt = match input_mode {
         Some(InputMode::UnlockPassword) => "Password:",
-        Some(InputMode::UnlockPasskeyPin) => "YubiKey PIN:",
+        Some(InputMode::UnlockSecurityKeyPin) => "Security key PIN:",
         _ => "",
     };
 
+    let visible_input = if is_secret_input_mode(input_mode) {
+        masked_input(input_buffer)
+    } else {
+        input_buffer.to_string()
+    };
     frame.render_widget(
-        Paragraph::new(format!("{prompt} {input_buffer}"))
+        Paragraph::new(format!("{prompt} {visible_input}"))
             .block(Block::default().borders(Borders::ALL).title("Input")),
         layout[1],
     );
@@ -873,16 +892,16 @@ fn draw_settings(
         ])
         .split(frame.area());
 
-    let passkeys = vault
-        .map(|vault| vault.passkey_ids().collect::<Vec<_>>().join(", "))
+    let credential_count = vault
+        .map(|vault| {
+            vault
+                .passkey_ids()
+                .filter(|id| id.starts_with("fido2:"))
+                .count()
+        })
         .unwrap_or_default();
     let text = format!(
-        "Authentication settings\n[e] Enroll physical key / Windows Hello credential (detect connected YubiKey + PIN verify)\n[r] Rotate password\n[x] Revoke credential\n[l] Lock now\n[b] Back to timeline\nCredentials: {}",
-        if passkeys.is_empty() {
-            "none"
-        } else {
-            passkeys.as_str()
-        }
+        "Authentication settings\n[e] Enroll physical security key (tap key + set PIN)\n[r] Rotate password\n[x] Revoke credential\n[l] Lock now\n[b] Back to timeline\nConfigured security keys: {credential_count}",
     );
 
     frame.render_widget(
@@ -893,14 +912,19 @@ fn draw_settings(
     );
 
     let prompt = match input_mode {
-        Some(InputMode::EnrollYubiKeyPin) => "YubiKey PIN for enrollment",
+        Some(InputMode::EnrollSecurityKeyPin) => "Security key PIN for enrollment",
         Some(InputMode::RotatePassword) => "New password",
-        Some(InputMode::RevokeYubiKey) => "Credential id to revoke",
+        Some(InputMode::RevokeSecurityKey) => "Credential id to revoke",
         _ => "",
     };
 
+    let visible_input = if is_secret_input_mode(input_mode) {
+        masked_input(input_buffer)
+    } else {
+        input_buffer.to_string()
+    };
     frame.render_widget(
-        Paragraph::new(format!("{prompt}: {input_buffer}"))
+        Paragraph::new(format!("{prompt}: {visible_input}"))
             .block(Block::default().borders(Borders::ALL).title("Input")),
         layout[1],
     );
@@ -911,6 +935,20 @@ fn draw_settings(
             .wrap(Wrap { trim: true }),
         layout[2],
     );
+}
+
+fn is_secret_input_mode(input_mode: Option<InputMode>) -> bool {
+    matches!(
+        input_mode,
+        Some(InputMode::UnlockPassword)
+            | Some(InputMode::UnlockSecurityKeyPin)
+            | Some(InputMode::EnrollSecurityKeyPin)
+            | Some(InputMode::RotatePassword)
+    )
+}
+
+fn masked_input(raw: &str) -> String {
+    "•".repeat(raw.chars().count())
 }
 
 fn current_epoch_secs() -> u64 {

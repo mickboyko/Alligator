@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
@@ -127,6 +129,11 @@ impl Vault {
         password: Option<&str>,
         passkeys: &[(String, String)],
     ) -> Result<Self, VaultError> {
+        if password.is_some_and(|value| value.trim().is_empty()) {
+            return Err(VaultError::InvalidInput(
+                "password must not be empty".to_string(),
+            ));
+        }
         validate_recovery_policy(password.is_some(), passkeys.len())?;
 
         let mut master_key = vec![0u8; KEY_LEN];
@@ -349,7 +356,21 @@ impl Vault {
 
     fn persist(&self) -> Result<(), VaultError> {
         let contents = serde_json::to_string_pretty(&self.disk)?;
-        fs::write(&self.path, contents)?;
+        #[cfg(unix)]
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&self.path)?;
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(&self.path, contents)?;
+        }
         Ok(())
     }
 }
@@ -611,5 +632,37 @@ mod tests {
         let err = Vault::create(&path, None, &[("key-1".into(), "secret-1".into())])
             .expect_err("expected recovery-policy error");
         assert!(matches!(err, VaultError::InvalidData(_)));
+    }
+
+    #[test]
+    fn recovery_policy_allows_password_only() {
+        let password = format!("password-{}", rand::random::<u64>());
+        let path = temp_path("password-only");
+        let vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
+        let unlocked = vault
+            .unlock_with_password(password.as_str())
+            .expect("unlock password-only vault");
+        assert_eq!(unlocked.providers().count(), 0);
+    }
+
+    #[test]
+    fn open_rejects_vault_owned_by_different_user() {
+        let password = format!("password-{}", rand::random::<u64>());
+        let path = temp_path("owner-mismatch");
+        let _vault = Vault::create(&path, Some(password.as_str()), &[]).expect("create vault");
+
+        let mut disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read vault json"))
+                .expect("parse vault json");
+        let current = Vault::current_os_user();
+        disk["owner_user"] = serde_json::Value::String(format!("{current}-other"));
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&disk).expect("serialize tampered owner"),
+        )
+        .expect("write tampered vault");
+
+        let err = Vault::open(&path).expect_err("expected owner mismatch");
+        assert!(matches!(err, VaultError::InvalidInput(_)));
     }
 }

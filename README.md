@@ -12,7 +12,7 @@ Rust TUI application that aggregates messages from multiple bridge sources into 
   - OAuth token secrets are encrypted on disk
   - Non-secret token metadata (provider/scopes/expiry) is stored separately
   - Vault file is bound to the current OS user identity
-  - Vault unlock supports password or enrolled YubiKey credentials
+  - Vault unlock supports password or enrolled generic security-key credentials
 - Simulated bridge sources for Slack, Teams, and Google Chat (only active when unlocked)
 - Left sidebar showing:
   - source indicator
@@ -35,23 +35,20 @@ After setup, use any key on splash to open login.
 
 - Unlock methods:
   - `p` → password unlock
-  - `k` → security-key unlock via **YubiKey PIV PIN** (for enrolled key)
+  - `k` → security-key unlock (tap key, then enter key PIN)
 - Timeline actions:
   - `↑` / `↓` → move selected room
   - `l` → lock immediately (returns to splash)
   - `s` → open authentication settings
 - Authentication settings actions:
   - `l` → lock immediately
-  - `e` → enroll connected YubiKey (prompts for YubiKey PIN and stores key serial credential)
+  - `e` → enroll security key (tap key and set PIN for local profile binding)
   - `r` → rotate password
-  - `x` → revoke key credential by ID (for example `yubikey:12345678`)
+  - `x` → revoke key credential by ID (for example `fido2:local:12ab34cd-56ef7890`)
   - `b` → back to timeline
 
-## YubiKey integration notes
+## Generic security-key notes
 
-- Uses the `yubikey` crate (PIV/PCSC path).
-- Build with YubiKey support enabled:
-  - `cargo run --features yubikey-auth`
-- Linux requires PCSC headers/runtime (e.g. `libpcsclite-dev`).
-- Enrollment verifies PIN on the connected key and stores a credential ID tied to that key serial.
-- Key login checks for an enrolled key serial and verifies PIN before unlocking.
+- Uses a vendor-neutral local FIDO2-style credential flow for physical keys.
+- Enrollment stores a generated `fido2:` credential bound to your local profile and key PIN.
+- Login with `k` attempts authentication against enrolled `fido2:` credentials using the entered PIN.

@@ -92,9 +92,13 @@ impl<R: OAuthRefresher> OAuthSessionManager<R> {
                 self.refresher
                     .refresh(&provider, &refresh_token, now_epoch_secs)
             {
+                let scopes = unlocked
+                    .metadata_for(&provider)
+                    .map(|meta| meta.scopes.clone())
+                    .unwrap_or_default();
                 unlocked.upsert_token(
                     provider,
-                    vec!["chat:read".to_string()],
+                    scopes,
                     refreshed.expires_at_epoch_secs,
                     refreshed.access_token,
                     refreshed.refresh_token,
@@ -158,7 +162,7 @@ mod tests {
             .expect("unlock vault");
         unlocked.upsert_token(
             "slack",
-            vec!["chat:read".to_string()],
+            vec!["channels:history".to_string(), "channels:read".to_string()],
             Some(10),
             "old-access",
             "old-refresh",
@@ -182,6 +186,56 @@ mod tests {
                 .secret_for("slack")
                 .map(|secret| secret.access_token.as_str()),
             Some("slack-new-access")
+        );
+        assert_eq!(
+            unlocked
+                .metadata_for("slack")
+                .map(|meta| meta.scopes.clone())
+                .unwrap_or_default(),
+            vec!["channels:history".to_string(), "channels:read".to_string()]
+        );
+    }
+
+    #[test]
+    fn refresh_skips_unexpired_tokens() {
+        let password = format!("password-{}", rand::random::<u64>());
+        let passkey_secret = format!("passkey-{}", rand::random::<u64>());
+        let path = temp_path("no-refresh");
+        let vault = Vault::create(
+            &path,
+            Some(password.as_str()),
+            &[("k1".into(), passkey_secret)],
+        )
+        .expect("create vault");
+
+        let mut unlocked = vault
+            .unlock_with_password(password.as_str())
+            .expect("unlock vault");
+        unlocked.upsert_token(
+            "slack",
+            vec!["channels:read".to_string()],
+            Some(1_000),
+            "unchanged-access",
+            "unchanged-refresh",
+        );
+
+        let manager = OAuthSessionManager::new(MockRefresher);
+        let updated = manager
+            .refresh_expiring_tokens(&mut unlocked, 999)
+            .expect("refresh should succeed");
+        assert_eq!(updated, 0);
+        assert_eq!(
+            unlocked
+                .secret_for("slack")
+                .map(|secret| secret.access_token.as_str()),
+            Some("unchanged-access")
+        );
+        assert_eq!(
+            unlocked
+                .metadata_for("slack")
+                .map(|meta| meta.scopes.clone())
+                .unwrap_or_default(),
+            vec!["channels:read".to_string()]
         );
     }
 }

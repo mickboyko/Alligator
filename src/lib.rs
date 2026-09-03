@@ -1,7 +1,14 @@
+pub mod auth;
+pub mod providers;
+pub mod vault;
+
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
+
+use providers::CredentialProvider;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum Source {
@@ -16,6 +23,14 @@ impl Source {
             Source::Teams => "Teams",
             Source::GoogleChat => "Google Chat",
             Source::Slack => "Slack",
+        }
+    }
+
+    pub fn provider_key(self) -> &'static str {
+        match self {
+            Source::Teams => "teams",
+            Source::GoogleChat => "google-chat",
+            Source::Slack => "slack",
         }
     }
 }
@@ -91,7 +106,7 @@ impl UnifiedTimeline {
 }
 
 pub trait Bridge: Send + 'static {
-    fn start(self, sender: Sender<Message>);
+    fn start(self, sender: Sender<Message>, credentials: Arc<dyn CredentialProvider>);
 }
 
 pub struct MockBridge {
@@ -127,10 +142,15 @@ impl MockBridge {
 }
 
 impl Bridge for MockBridge {
-    fn start(self, sender: Sender<Message>) {
+    fn start(self, sender: Sender<Message>, credentials: Arc<dyn CredentialProvider>) {
         thread::spawn(move || {
             loop {
                 for body in &self.messages {
+                    if credentials.access_token_for_source(self.source).is_none() {
+                        thread::sleep(self.interval);
+                        continue;
+                    }
+
                     if sender
                         .send(Message {
                             source: self.source,
@@ -153,7 +173,21 @@ impl Bridge for MockBridge {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+
     use super::*;
+    use crate::providers::SessionCredentialProvider;
+    use crate::vault::Vault;
+
+    fn temp_path(label: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "alligator-lib-{label}-{}.json",
+            rand::random::<u64>()
+        ));
+        path
+    }
 
     fn sample_message(
         source: Source,
@@ -203,8 +237,18 @@ mod tests {
     #[test]
     fn keeps_single_room_entry_across_streams() {
         let mut timeline = UnifiedTimeline::new();
-        timeline.ingest(sample_message(Source::Teams, "account-a", "ops", "from account a"));
-        timeline.ingest(sample_message(Source::Teams, "account-b", "ops", "from account b"));
+        timeline.ingest(sample_message(
+            Source::Teams,
+            "account-a",
+            "ops",
+            "from account a",
+        ));
+        timeline.ingest(sample_message(
+            Source::Teams,
+            "account-b",
+            "ops",
+            "from account b",
+        ));
 
         let rooms = timeline.ordered_rooms();
         assert_eq!(rooms.len(), 1);
@@ -215,12 +259,63 @@ mod tests {
     #[test]
     fn keeps_sources_separate_for_same_room_id() {
         let mut timeline = UnifiedTimeline::new();
-        timeline.ingest(sample_message(Source::Slack, "stream-a", "eng", "slack msg"));
-        timeline.ingest(sample_message(Source::Teams, "stream-b", "eng", "teams msg"));
+        timeline.ingest(sample_message(
+            Source::Slack,
+            "stream-a",
+            "eng",
+            "slack msg",
+        ));
+        timeline.ingest(sample_message(
+            Source::Teams,
+            "stream-b",
+            "eng",
+            "teams msg",
+        ));
 
         let rooms = timeline.ordered_rooms();
         assert_eq!(rooms.len(), 2);
         assert_eq!(rooms[0].source, Source::Teams);
         assert_eq!(rooms[1].source, Source::Slack);
+    }
+
+    #[test]
+    fn mock_bridge_requires_credentials() {
+        let password = format!("password-{}", rand::random::<u64>());
+        let passkey_secret = format!("passkey-{}", rand::random::<u64>());
+        let (tx, rx) = mpsc::channel();
+        let path = temp_path("bridge");
+        let vault = Vault::create(
+            &path,
+            Some(password.as_str()),
+            &[("k1".into(), passkey_secret)],
+        )
+        .expect("create vault");
+        let mut unlocked = vault
+            .unlock_with_password(password.as_str())
+            .expect("unlock");
+        unlocked.upsert_token(
+            "slack",
+            vec!["chat:read".to_string()],
+            Some(100),
+            "access",
+            "refresh",
+        );
+        let credentials = Arc::new(SessionCredentialProvider::from_unlocked(&unlocked));
+
+        MockBridge::new(
+            Source::Slack,
+            "stream",
+            "room",
+            "Room",
+            "bot",
+            vec!["hello"],
+            Duration::from_millis(5),
+        )
+        .start(tx, credentials);
+
+        let message = rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("message should be emitted when credentials are present");
+        assert_eq!(message.body, "hello");
     }
 }

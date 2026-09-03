@@ -150,7 +150,7 @@ impl Bridge for MockBridge {
             loop {
                 for body in &self.messages {
                     if credentials.access_token_for_source(self.source).is_none() {
-                        thread::sleep(self.interval);
+                        thread::sleep(self.min_interval);
                         continue;
                     }
 
@@ -317,6 +317,7 @@ mod tests {
             "Room",
             "bot",
             vec!["hello"],
+            Duration::from_millis(5),
             Duration::from_millis(5),
         )
         .start(tx, credentials);

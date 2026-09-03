@@ -6,13 +6,13 @@ Rust TUI application that aggregates messages from multiple bridge sources into 
 ## Current behavior
 
 - Startup splash screen with custom ASCII alligator art and title treatment
-- Simulated bridge sources for Slack, Teams, and Google Chat
+- Simulated single-stream Slack bridge demo
 - Left sidebar showing:
   - source indicator
   - room title
   - preview of latest message
 - Main timeline showing messages for the selected room
-- Near real-time updates as bridge messages are received
+- Demo updates every 2-5 seconds to mimic a single incoming stream
 
 ## Run
 

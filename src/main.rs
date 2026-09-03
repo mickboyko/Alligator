@@ -61,6 +61,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
     let bridges = vec![
         MockBridge::new(
             Source::Slack,
+            "slack-primary",
             "eng",
             "Engineering",
             "marina",
@@ -73,6 +74,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
         ),
         MockBridge::new(
             Source::Teams,
+            "teams-primary",
             "ops",
             "Operations",
             "drew",
@@ -84,7 +86,21 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<(), Box<dyn Error>
             Duration::from_millis(1200),
         ),
         MockBridge::new(
+            Source::Teams,
+            "teams-secondary",
+            "meeting-q3",
+            "Q3 Planning Meeting",
+            "avery",
+            vec![
+                "Can we lock down next week for planning?",
+                "Shared the latest roadmap doc",
+                "Action items are in the meeting notes",
+            ],
+            Duration::from_millis(1100),
+        ),
+        MockBridge::new(
             Source::GoogleChat,
+            "gchat-primary",
             "design",
             "Design",
             "sofia",
